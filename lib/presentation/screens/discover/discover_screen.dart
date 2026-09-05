@@ -27,7 +27,9 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
 
   List<dynamic> _trendingItems = [];
   List<dynamic> _searchResults = [];
+  List<dynamic> _platformShows = [];
   bool _isLoadingTrending = true;
+  bool _isLoadingPlatform = false;
   bool _isSearching = false;
   int? _selectedProviderId;
   Timer? _debounce;
@@ -44,6 +46,26 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
     _debounce?.cancel();
     _tmdbService.dispose();
     super.dispose();
+  }
+
+  Future<void> _onPlatformSelected(int? providerId) async {
+    setState(() {
+      _selectedProviderId = providerId;
+      _isLoadingPlatform = providerId != null;
+    });
+
+    if (providerId == null) {
+      setState(() => _platformShows = []);
+      return;
+    }
+
+    final shows = await _tmdbService.getShowsByProvider(providerId);
+    if (mounted) {
+      setState(() {
+        _platformShows = shows;
+        _isLoadingPlatform = false;
+      });
+    }
   }
 
   Future<void> _loadTrending() async {
@@ -301,7 +323,7 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
                     ),
                     PlatformFilterBar(
                       selectedProviderId: _selectedProviderId,
-                      onSelect: (id) => setState(() => _selectedProviderId = id),
+                      onSelect: _onPlatformSelected,
                     ),
                   ],
                 ),
@@ -314,27 +336,45 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
                 child: Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                   child: Text(
-                    'POPULAR SHOWS',
+                    _selectedProviderId != null ? 'SHOWS ON SELECTED PLATFORM' : 'POPULAR SHOWS',
                     style: AppTypography.labelCode,
                   ),
                 ),
               ),
 
-              SliverPadding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                sliver: SliverList(
-                  delegate: SliverChildBuilderDelegate(
-                    (context, index) {
-                      final item = _trendingItems.isNotEmpty
-                          ? _trendingItems[index % _trendingItems.length]
-                          : null;
-                      if (item == null) return const SizedBox.shrink();
-                      return _buildSearchResultTile(item);
-                    },
-                    childCount: _trendingItems.length,
+              if (_isLoadingPlatform)
+                const SliverToBoxAdapter(
+                  child: Padding(
+                    padding: EdgeInsets.all(32),
+                    child: Center(
+                      child: CircularProgressIndicator(
+                        valueColor: AlwaysStoppedAnimation(AppColors.primaryAccent),
+                      ),
+                    ),
+                  ),
+                )
+              else
+                SliverPadding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  sliver: SliverList(
+                    delegate: SliverChildBuilderDelegate(
+                      (context, index) {
+                        final items = _selectedProviderId != null && _platformShows.isNotEmpty
+                            ? _platformShows
+                            : _trendingItems;
+                        final item = items.isNotEmpty
+                            ? items[index % items.length]
+                            : null;
+                        if (item == null) return const SizedBox.shrink();
+                        return _buildSearchResultTile(item);
+                      },
+                      childCount: (_selectedProviderId != null && _platformShows.isNotEmpty
+                              ? _platformShows
+                              : _trendingItems)
+                          .length,
+                    ),
                   ),
                 ),
-              ),
             ],
 
             const SliverToBoxAdapter(child: SizedBox(height: 100)),

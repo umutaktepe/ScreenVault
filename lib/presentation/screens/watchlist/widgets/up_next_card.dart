@@ -99,7 +99,7 @@ class UpNextCard extends StatelessWidget {
                       child: CheckmarkToggleButton(
                         isWatched: episode.isWatched,
                         onToggle: onToggleWatched,
-                        size: 44,
+                        size: 40,
                       ),
                     ),
                     // Air Date / Duration Label

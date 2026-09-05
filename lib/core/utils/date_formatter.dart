@@ -8,6 +8,11 @@ class DateFormatter {
   static final DateFormat _isoFormat = DateFormat('yyyy-MM-dd');
   static final DateFormat _dayOfWeekFormat = DateFormat('EEE');
   static final DateFormat _dayOfMonthFormat = DateFormat('d');
+  static final DateFormat _monthYearFormat = DateFormat('MMMM yyyy');
+
+  static String formatMonthYear(DateTime date) {
+    return _monthYearFormat.format(date);
+  }
 
   static String formatAirDate(DateTime? date) {
     if (date == null) return 'TBA';

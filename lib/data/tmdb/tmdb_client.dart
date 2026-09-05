@@ -3,15 +3,16 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:dio/dio.dart';
 
-/// Robust TMDB API v3 HTTP Client with Rate Limiting and 429 Retry-After support
+/// Robust TMDB API v3 HTTP Client with serialized Rate Limiting and 429 Retry-After support
 class TmdbClient {
   final Dio _dio;
   final HttpClient _fallbackClient = HttpClient();
 
-  // Rate limiting queue: Token Bucket (max 40 requests/sec)
+  // Serialized FIFO Token Bucket rate limiter (max 35 requests/second)
   final List<DateTime> _requestTimestamps = [];
   static const int _maxRequestsPerWindow = 35;
   static const Duration _rateWindow = Duration(seconds: 1);
+  Future<void> _throttleQueue = Future.value();
 
   TmdbClient({Dio? dio})
       : _dio = dio ??
@@ -25,18 +26,25 @@ class TmdbClient {
               ),
             );
 
-  Future<void> _throttle() async {
-    final now = DateTime.now();
-    _requestTimestamps.removeWhere((t) => now.difference(t) > _rateWindow);
+  Future<void> _throttle() {
+    final completer = Completer<void>();
+    _throttleQueue = _throttleQueue.then((_) async {
+      final now = DateTime.now();
+      _requestTimestamps.removeWhere((t) => now.difference(t) > _rateWindow);
 
-    if (_requestTimestamps.length >= _maxRequestsPerWindow) {
-      final oldest = _requestTimestamps.first;
-      final waitDuration = _rateWindow - now.difference(oldest);
-      if (waitDuration > Duration.zero) {
-        await Future.delayed(waitDuration);
+      if (_requestTimestamps.length >= _maxRequestsPerWindow) {
+        final oldest = _requestTimestamps.first;
+        final waitDuration = _rateWindow - now.difference(oldest);
+        if (waitDuration > Duration.zero) {
+          await Future.delayed(waitDuration);
+        }
       }
-    }
-    _requestTimestamps.add(DateTime.now());
+      _requestTimestamps.add(DateTime.now());
+      completer.complete();
+    }).catchError((e) {
+      completer.complete();
+    });
+    return completer.future;
   }
 
   /// Sends a GET request with automatic 429 retry and fallback
@@ -62,7 +70,6 @@ class TmdbClient {
         }
 
         if (attempt == retries - 1) {
-          // Attempt fallback to dart:io HttpClient
           return await _fallbackGet(uri);
         }
       } catch (_) {

@@ -113,6 +113,21 @@ class TmdbService {
     return trending;
   }
 
+  /// Regional watch provider discover query (e.g. Netflix 8, Prime 119, BluTV 341)
+  Future<List<ShowModel>> getShowsByProvider(int providerId) async {
+    final uri = TmdbEndpoints.discoverTvByProvider(providerId);
+    final response = await _client.get(uri);
+    final results = response['results'] as List?;
+    if (results == null) return [];
+    final List<ShowModel> shows = [];
+    for (final item in results) {
+      if (item is Map<String, dynamic>) {
+        shows.add(ShowModel.fromTmdbJson(item));
+      }
+    }
+    return shows;
+  }
+
   void dispose() {
     _client.dispose();
   }

@@ -148,9 +148,9 @@ class TvTimeMigrator {
             episodesWatched++;
 
             final sId = int.tryParse(cols[7]);
-            final epNo = int.tryParse(cols[1]) ?? int.tryParse(cols[28]) ?? 0;
+            final epNo = int.tryParse(cols[1]) ?? (cols.length > 28 ? int.tryParse(cols[28]) : null) ?? 0;
             final sNo = int.tryParse(cols[8]) ?? int.tryParse(cols[27]) ?? 0;
-            final title = cols[26].isNotEmpty ? cols[26] : 'Show $sId';
+            final title = cols.length > 26 && cols[26].isNotEmpty ? cols[26] : 'Show $sId';
 
             final record = WatchRecordModel(
               id: i,
@@ -177,13 +177,20 @@ class TvTimeMigrator {
         );
         final content = utf8.decode(trackingMoviesFile.content as List<int>, allowMalformed: true);
         final lines = const LineSplitter().convert(content);
+        final Set<String> seenMovies = {};
+
         for (int i = 1; i < lines.length; i++) {
           final line = lines[i].trim();
           if (line.isEmpty) continue;
           final cols = _parseCsvLine(line);
-          if (cols.length >= 17) {
-            final movieName = cols[17].isNotEmpty ? cols[17] : (cols.length > 18 ? cols[18] : '');
-            if (movieName.isNotEmpty) {
+          // Columns: 9: entity_type, 11: runtime, 17: watch_date_range_key, 18: movie_name
+          if (cols.length >= 19 && (cols.length <= 9 || cols[9] == 'movie' || cols[9].isEmpty)) {
+            final movieName = cols[18].trim().isNotEmpty
+                ? cols[18].trim()
+                : (cols.length > 19 ? cols[19].trim() : '');
+
+            if (movieName.isNotEmpty && !seenMovies.contains(movieName)) {
+              seenMovies.add(movieName);
               moviesCount++;
               final runtimeSec = int.tryParse(cols[11]) ?? 0;
               final movie = MovieModel(
@@ -192,6 +199,7 @@ class TvTimeMigrator {
                 runtimeMinutes: DurationFormatter.secondsToMinutes(runtimeSec),
                 isWatched: true,
                 isFollowed: true,
+                watchedAt: DateTime.tryParse(cols[4]) ?? DateTime.tryParse(cols[10]),
               );
               await _dbService.upsertMovie(movie);
             }

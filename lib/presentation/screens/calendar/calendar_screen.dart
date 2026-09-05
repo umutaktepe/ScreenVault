@@ -44,7 +44,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
                       ),
                       const SizedBox(height: 2),
                       Text(
-                        'September 2026',
+                        DateFormatter.formatMonthYear(_selectedDate),
                         style: AppTypography.bodyMedium,
                       ),
                     ],

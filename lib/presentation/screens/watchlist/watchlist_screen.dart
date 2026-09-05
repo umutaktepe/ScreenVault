@@ -116,9 +116,11 @@ class _WatchlistScreenState extends State<WatchlistScreen> {
                 child: StreamBuilder<List<ShowModel>>(
                   stream: _dbService.showsStream,
                   builder: (context, snapshot) {
-                    final shows = _dbService.getFollowedShows();
-                    final upNextShow = shows.isNotEmpty ? shows.firstWhere((s) => s.id == 2, orElse: () => shows.first) : null;
                     final upNextEp = _dbService.getUpNextEpisode();
+                    final shows = _dbService.getFollowedShows();
+                    final upNextShow = upNextEp != null
+                        ? (_dbService.getShowById(upNextEp.showId) ?? (shows.isNotEmpty ? shows.first : null))
+                        : (shows.isNotEmpty ? shows.first : null);
 
                     if (upNextShow == null || upNextEp == null) {
                       return const SizedBox.shrink();
@@ -179,15 +181,22 @@ class _WatchlistScreenState extends State<WatchlistScreen> {
                         return WatchlistItemTile(
                           show: show,
                           onTap: () {
-                            final ep = _dbService.getUpNextEpisode() ??
-                                EpisodeModel(
-                                  id: 101,
-                                  showId: show.id,
-                                  seasonId: 1,
-                                  seasonNumber: 1,
-                                  episodeNumber: 1,
-                                  name: 'Pilot',
-                                );
+                            final showEpisodes = _dbService.getEpisodesForShow(show.id);
+                            final ep = showEpisodes.firstWhere(
+                              (e) => !e.isWatched,
+                              orElse: () => showEpisodes.isNotEmpty
+                                  ? showEpisodes.first
+                                  : EpisodeModel(
+                                      id: show.id * 1000 + 1,
+                                      showId: show.id,
+                                      seasonId: 1,
+                                      seasonNumber: 1,
+                                      episodeNumber: 1,
+                                      name: '${show.name} - 1. Bölüm',
+                                      overview: show.overview,
+                                      stillPath: show.backdropPath,
+                                    ),
+                            );
                             Navigator.of(context).push(
                               MaterialPageRoute(
                                 builder: (context) => EpisodeDetailScreen(
