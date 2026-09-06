@@ -53,6 +53,7 @@ class UpNextCard extends StatelessWidget {
                   children: [
                     CustomPosterImage(
                       path: episode.stillPath ?? show.backdropPath,
+                      fallbackPath: show.posterPath,
                       fit: BoxFit.cover,
                       borderRadius: 0,
                       size: 'w780',

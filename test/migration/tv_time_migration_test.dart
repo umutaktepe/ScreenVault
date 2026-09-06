@@ -34,7 +34,7 @@ void main() {
       expect(progressEvents.isNotEmpty, isTrue);
       final lastEvent = progressEvents.last;
 
-      expect(lastEvent.isError, isFalse, reason: 'Migration should complete without errors');
+      expect(lastEvent.isError, isFalse, reason: 'Migration should complete without errors: ${lastEvent.errorMessage}');
       expect(lastEvent.isCompleted, isTrue);
       expect(lastEvent.percentage, 1.0);
 

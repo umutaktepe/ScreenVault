@@ -4,6 +4,7 @@ import '../../../core/theme/app_typography.dart';
 import '../../../core/utils/date_formatter.dart';
 import '../../../data/models/show_model.dart';
 import '../../../data/models/episode_model.dart';
+import '../../../data/database/database_service.dart';
 import '../../common/custom_poster_image.dart';
 import '../episode_detail/episode_detail_screen.dart';
 import 'widgets/calendar_day_strip.dart';
@@ -92,36 +93,45 @@ class _CalendarScreenState extends State<CalendarScreen> {
 
             // Upcoming Episodes List
             Expanded(
-              child: ListView(
-                physics: const BouncingScrollPhysics(),
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                children: [
-                  _buildReleaseCard(
-                    showTitle: 'Behzat Ç.',
-                    episodeCode: 'S05 · E01',
-                    episodeTitle: 'Yeni Bir Başlangıç',
-                    airDate: DateTime.now(),
-                    network: 'BluTV',
-                    posterPath: '/h1qYgG4CjQzWqK8W1gqg6h7yU9a.jpg',
-                  ),
-                  _buildReleaseCard(
-                    showTitle: 'Dark: Reunion',
-                    episodeCode: 'S01 · E01',
-                    episodeTitle: 'The Beginning is the End',
-                    airDate: DateTime.now().add(const Duration(days: 2)),
-                    network: 'Netflix',
-                    posterPath: '/apbrbWs8M9lyOpJYU5WXrpFbk1Z.jpg',
-                  ),
-                  _buildReleaseCard(
-                    showTitle: 'Succession: The Board',
-                    episodeCode: 'S05 · E01',
-                    episodeTitle: 'Waystar Global',
-                    airDate: DateTime.now().add(const Duration(days: 4)),
-                    network: 'HBO Max',
-                    posterPath: '/7hdg5kYwA5kE7w1h0U6cK7u.jpg',
-                  ),
-                  const SizedBox(height: 100), // padding for navbar
-                ],
+              child: Builder(
+                builder: (context) {
+                  final db = DatabaseService();
+                  final behzat = db.getShowById(2);
+                  final dark = db.getShowById(3);
+                  final succession = db.getShowById(4);
+
+                  return ListView(
+                    physics: const BouncingScrollPhysics(),
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    children: [
+                      _buildReleaseCard(
+                        showTitle: 'Behzat Ç.',
+                        episodeCode: 'S05 · E01',
+                        episodeTitle: 'Yeni Bir Başlangıç',
+                        airDate: DateTime.now(),
+                        network: 'BluTV',
+                        posterPath: behzat?.posterPath,
+                      ),
+                      _buildReleaseCard(
+                        showTitle: 'Dark: Reunion',
+                        episodeCode: 'S01 · E01',
+                        episodeTitle: 'The Beginning is the End',
+                        airDate: DateTime.now().add(const Duration(days: 2)),
+                        network: 'Netflix',
+                        posterPath: dark?.posterPath ?? '/apbrbWs8M9lyOpJYU5WXrpFbk1Z.jpg',
+                      ),
+                      _buildReleaseCard(
+                        showTitle: 'Succession: The Board',
+                        episodeCode: 'S05 · E01',
+                        episodeTitle: 'Waystar Global',
+                        airDate: DateTime.now().add(const Duration(days: 4)),
+                        network: 'HBO Max',
+                        posterPath: succession?.posterPath,
+                      ),
+                      const SizedBox(height: 100), // padding for navbar
+                    ],
+                  );
+                },
               ),
             ),
           ],
@@ -162,7 +172,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
     required String episodeTitle,
     required DateTime airDate,
     required String network,
-    required String posterPath,
+    String? posterPath,
   }) {
     return GestureDetector(
       onTap: () {

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:archive/archive.dart';
@@ -152,9 +153,20 @@ class TvTimeMigrator {
             final sNo = int.tryParse(cols[8]) ?? int.tryParse(cols[27]) ?? 0;
             final title = cols.length > 26 && cols[26].isNotEmpty ? cols[26] : 'Show $sId';
 
+            final allShows = _dbService.getAllShows();
+            ShowModel? matchingShow;
+            for (final s in allShows) {
+              if (s.id == sId || s.tvdbId == sId || (s.name.isNotEmpty && title.toLowerCase().contains(s.name.toLowerCase()))) {
+                matchingShow = s;
+                break;
+              }
+            }
+
             final record = WatchRecordModel(
               id: i,
+              showId: matchingShow?.id ?? sId,
               sId: sId,
+              tvdbId: sId,
               seasonNumber: sNo,
               episodeNumber: epNo,
               title: title,
@@ -164,6 +176,15 @@ class TvTimeMigrator {
             _dbService.addWatchRecord(record);
           }
         }
+
+        // Update watched episodes count for all shows from imported watch records
+        for (final show in _dbService.getAllShows()) {
+          final count = _dbService.getWatchedEpisodesCountForShow(show.id);
+          if (count > 0 && count != show.watchedEpisodesCount) {
+            await _dbService.upsertShow(show.copyWith(watchedEpisodesCount: count));
+          }
+        }
+        await _dbService.syncEpisodesWithWatchHistory();
       }
 
       // 3. Parse tracking-prod-records.csv (Movies)
@@ -228,6 +249,9 @@ class TvTimeMigrator {
           }
         }
       }
+
+      // Trigger background enrichment from TMDB for all imported items
+      unawaited(_dbService.enrichAllMissingMetadata());
 
       yield MigrationProgress(
         current: 100,

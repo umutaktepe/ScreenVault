@@ -65,4 +65,36 @@ class WatchRecordModel {
       isMovie: (map['is_movie'] as int? ?? 0) == 1,
     );
   }
+
+  WatchRecordModel copyWith({
+    int? id,
+    int? episodeId,
+    int? showId,
+    int? movieId,
+    int? tvdbId,
+    int? sId,
+    int? seasonNumber,
+    int? episodeNumber,
+    String? title,
+    int? runtimeMinutes,
+    DateTime? watchedAt,
+    int? rewatchCount,
+    bool? isMovie,
+  }) {
+    return WatchRecordModel(
+      id: id ?? this.id,
+      episodeId: episodeId ?? this.episodeId,
+      showId: showId ?? this.showId,
+      movieId: movieId ?? this.movieId,
+      tvdbId: tvdbId ?? this.tvdbId,
+      sId: sId ?? this.sId,
+      seasonNumber: seasonNumber ?? this.seasonNumber,
+      episodeNumber: episodeNumber ?? this.episodeNumber,
+      title: title ?? this.title,
+      runtimeMinutes: runtimeMinutes ?? this.runtimeMinutes,
+      watchedAt: watchedAt ?? this.watchedAt,
+      rewatchCount: rewatchCount ?? this.rewatchCount,
+      isMovie: isMovie ?? this.isMovie,
+    );
+  }
 }

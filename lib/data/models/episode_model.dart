@@ -100,15 +100,28 @@ class EpisodeModel {
   }
 
   factory EpisodeModel.fromMap(Map<String, dynamic> map) {
+    final rawName = map['name'] as String?;
+    final epNum = map['episode_number'] as int? ?? 0;
+    String cleanName = rawName?.trim() ?? '';
+    final lower = cleanName.toLowerCase();
+    if (cleanName.isEmpty ||
+        lower == 'başlık yok' ||
+        lower == 'baslik yok' ||
+        lower == 'no title' ||
+        lower == 'untitled' ||
+        lower == 'tba') {
+      cleanName = '$epNum. Bölüm';
+    }
+
     return EpisodeModel(
       id: map['id'] as int? ?? 0,
       showId: map['show_id'] as int? ?? 0,
       seasonId: map['season_id'] as int? ?? 0,
       seasonNumber: map['season_number'] as int? ?? 0,
-      episodeNumber: map['episode_number'] as int? ?? 0,
+      episodeNumber: epNum,
       tvdbId: map['tvdb_id'] as int?,
       tmdbId: map['tmdb_id'] as int?,
-      name: map['name'] as String? ?? 'Episode ${map['episode_number']}',
+      name: cleanName,
       overview: map['overview'] as String?,
       stillPath: map['still_path'] as String?,
       runtimeMinutes: map['runtime_minutes'] as int? ?? 0,
@@ -121,14 +134,27 @@ class EpisodeModel {
   }
 
   factory EpisodeModel.fromTmdbJson(Map<String, dynamic> json, int showId, int seasonId) {
+    final rawName = json['name'] as String?;
+    final epNum = json['episode_number'] as int? ?? 0;
+    String cleanName = rawName?.trim() ?? '';
+    final lower = cleanName.toLowerCase();
+    if (cleanName.isEmpty ||
+        lower == 'başlık yok' ||
+        lower == 'baslik yok' ||
+        lower == 'no title' ||
+        lower == 'untitled' ||
+        lower == 'tba') {
+      cleanName = '$epNum. Bölüm';
+    }
+
     return EpisodeModel(
       id: json['id'] as int? ?? 0,
       showId: showId,
       seasonId: seasonId,
       seasonNumber: json['season_number'] as int? ?? 0,
-      episodeNumber: json['episode_number'] as int? ?? 0,
+      episodeNumber: epNum,
       tmdbId: json['id'] as int?,
-      name: json['name'] as String? ?? 'Episode ${json['episode_number']}',
+      name: cleanName,
       overview: json['overview'] as String?,
       stillPath: json['still_path'] as String?,
       runtimeMinutes: json['runtime'] as int? ?? 0,
