@@ -1,4 +1,5 @@
 import '../models/show_model.dart';
+import '../models/season_model.dart';
 import '../models/episode_model.dart';
 import '../models/movie_model.dart';
 import 'tmdb_client.dart';
@@ -37,6 +38,20 @@ class TmdbService {
     return null;
   }
 
+  /// Fetches seasons list for a TV show from TMDB
+  Future<List<SeasonModel>> getShowSeasons(int tmdbShowId, {int showInternalId = 0}) async {
+    final uri = TmdbEndpoints.tvShowDetails(tmdbShowId);
+    final response = await _client.get(uri);
+    final seasonsJson = response['seasons'] as List?;
+    if (seasonsJson != null) {
+      return seasonsJson
+          .where((s) => s is Map<String, dynamic> && (s['season_number'] as int? ?? 0) > 0)
+          .map((s) => SeasonModel.fromTmdbJson(s as Map<String, dynamic>, showInternalId))
+          .toList();
+    }
+    return [];
+  }
+
   /// Fetches episodes and runtimes for a season (stage 2 of two-stage rule)
   Future<List<EpisodeModel>> getSeasonEpisodes(
     int tmdbShowId,
@@ -58,6 +73,42 @@ class TmdbService {
           .toList();
     }
     return [];
+  }
+
+  /// Searches for a TV show by name on TMDB
+  Future<ShowModel?> searchTvShowByName(String query) async {
+    if (query.trim().isEmpty) return null;
+    final uri = TmdbEndpoints.searchTv(query);
+    final response = await _client.get(uri);
+    final results = response['results'] as List?;
+    if (results != null && results.isNotEmpty) {
+      final first = results.first as Map<String, dynamic>;
+      final tmdbId = first['id'] as int?;
+      if (tmdbId != null) {
+        final details = await getTvShowDetails(tmdbId);
+        if (details != null) return details;
+      }
+      return ShowModel.fromTmdbJson(first);
+    }
+    return null;
+  }
+
+  /// Searches for a Movie by name on TMDB
+  Future<MovieModel?> searchMovieByName(String query) async {
+    if (query.trim().isEmpty) return null;
+    final uri = TmdbEndpoints.searchMovie(query);
+    final response = await _client.get(uri);
+    final results = response['results'] as List?;
+    if (results != null && results.isNotEmpty) {
+      final first = results.first as Map<String, dynamic>;
+      final tmdbId = first['id'] as int?;
+      if (tmdbId != null) {
+        final details = await getMovieDetails(tmdbId);
+        if (details != null) return details;
+      }
+      return MovieModel.fromTmdbJson(first);
+    }
+    return null;
   }
 
   /// Fetches full Movie details

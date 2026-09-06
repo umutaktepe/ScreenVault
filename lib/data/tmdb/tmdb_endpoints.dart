@@ -49,6 +49,7 @@ class TmdbEndpoints {
   static String imageUrl(String? path, {String size = 'w500'}) {
     if (path == null || path.isEmpty) return '';
     if (path.startsWith('http')) return path;
-    return '${AppConstants.tmdbImageBaseUrl}$size$path';
+    final normalizedPath = path.startsWith('/') ? path : '/$path';
+    return '${AppConstants.tmdbImageBaseUrl}$size$normalizedPath';
   }
 }

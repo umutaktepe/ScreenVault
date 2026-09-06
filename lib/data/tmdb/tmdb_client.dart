@@ -22,9 +22,12 @@ class TmdbClient {
                 receiveTimeout: const Duration(seconds: 15),
                 headers: {
                   'Accept': 'application/json',
+                  'User-Agent': 'ScreenVault/1.0',
                 },
               ),
-            );
+            ) {
+    _fallbackClient.userAgent = 'ScreenVault/1.0';
+  }
 
   Future<void> _throttle() {
     final completer = Completer<void>();

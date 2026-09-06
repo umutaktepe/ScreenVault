@@ -5,10 +5,9 @@ import '../../../core/theme/app_typography.dart';
 import '../../../data/tmdb/tmdb_service.dart';
 import '../../../data/models/show_model.dart';
 import '../../../data/models/movie_model.dart';
-import '../../../data/models/episode_model.dart';
 import '../../../data/database/database_service.dart';
 import '../../common/custom_poster_image.dart';
-import '../episode_detail/episode_detail_screen.dart';
+import '../show_detail/show_detail_screen.dart';
 import 'widgets/trending_carousel.dart';
 import 'widgets/platform_filter_bar.dart';
 
@@ -129,21 +128,14 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
 
   void _handleItemTap(dynamic item) {
     if (item is ShowModel) {
-      final defaultEp = EpisodeModel(
-        id: 101,
-        showId: item.id,
-        seasonId: 1,
-        seasonNumber: 1,
-        episodeNumber: 1,
-        name: 'Pilot',
-        overview: item.overview,
-        stillPath: item.backdropPath,
-      );
+      final resolvedShow = _dbService.getShowById(item.id) ??
+          (item.tvdbId != null ? _dbService.getShowById(item.tvdbId!) : null) ??
+          (item.tmdbId != null ? _dbService.getShowById(item.tmdbId!) : null) ??
+          item;
       Navigator.of(context).push(
         MaterialPageRoute(
-          builder: (context) => EpisodeDetailScreen(
-            show: item,
-            episode: defaultEp,
+          builder: (context) => ShowDetailScreen(
+            show: resolvedShow,
           ),
         ),
       );
