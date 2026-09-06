@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'core/theme/obsidian_theme.dart';
+import 'core/network/pocketbase_client.dart';
+import 'data/sync/pocketbase_sync_engine.dart';
 import 'presentation/screens/main_navigation_shell.dart';
 import 'data/database/database_service.dart';
 
@@ -19,6 +21,10 @@ void main() async {
 
   // Initialize Database Service
   await DatabaseService().init();
+
+  // Initialize PocketBase Client and Offline-First Sync Engine
+  await PocketBaseClient().initialize();
+  PocketBaseSyncEngine().initialize();
 
   runApp(const ScreenVaultApp());
 }
