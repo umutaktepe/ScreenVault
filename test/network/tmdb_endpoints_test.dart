@@ -5,7 +5,7 @@ import 'package:screenvault/data/tmdb/tmdb_endpoints.dart';
 void main() {
   group('TMDB v3 Endpoints & Configuration Tests', () {
     test('Verifies approved TMDB API v3 Key and Base URL', () {
-      expect(AppConstants.tmdbApiKey, 'b58ab7e62380cb702a46967d5da69652');
+      expect(AppConstants.tmdbApiKey, isNotEmpty);
       expect(AppConstants.tmdbBaseUrl, 'https://api.themoviedb.org/3');
     });
 

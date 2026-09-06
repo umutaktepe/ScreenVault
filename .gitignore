@@ -55,3 +55,17 @@ migrate_working_dir/
 # Symbolication / Obfuscation
 app.*.symbols
 app.*.map.json
+
+# PocketBase local binaries & runtime database
+pbase/pocketbase
+pbase/pocketbase.exe
+pbase/pb_data/
+pbase/*.log
+pbase/CHANGELOG.md
+pbase/LICENSE.md
+
+# Environment & Secrets
+.env
+.env.*
+*.env
+!.env.example
