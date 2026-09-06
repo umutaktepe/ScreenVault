@@ -8,9 +8,13 @@ import '../../../data/migration/tv_time_migrator.dart';
 import '../../../data/migration/tv_time_exporter.dart';
 import '../../common/led_time_counter.dart';
 import '../../common/user_avatar.dart';
+import '../../../data/services/pocketbase_auth_service.dart';
+import '../auth/auth_screen.dart';
 import 'widgets/genre_donut_chart.dart';
 import 'widgets/activity_heatmap.dart';
 import 'widgets/rewatch_rail.dart';
+import 'widgets/cloud_sync_card.dart';
+import 'widgets/server_settings_sheet.dart';
 
 /// Profile & Statistics Screen matching Stitch specification
 class ProfileScreen extends StatefulWidget {
@@ -111,8 +115,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
                           style: AppTypography.headline1,
                         ),
                         IconButton(
-                          icon: const Icon(Icons.settings_outlined, color: AppColors.secondarySlate),
-                          onPressed: () {},
+                          icon: const Icon(Icons.tune_rounded, color: AppColors.secondarySlate),
+                          tooltip: 'Sunucu Ayarları',
+                          onPressed: () => ServerSettingsSheet.show(context),
                         ),
                       ],
                     ),
@@ -121,35 +126,84 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
                 // User Info Header
                 SliverToBoxAdapter(
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                    child: Row(
-                      children: [
-                        const UserAvatar(
-                          radius: 32,
-                          borderColor: AppColors.primaryAccent,
-                          fallbackText: 'Umut',
-                        ),
-                        const SizedBox(width: 16),
-                        Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'Umut Aktepe',
-                              style: AppTypography.headline2,
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              'TV Time Explorer • PRO Member',
-                              style: AppTypography.bodySmall.copyWith(
-                                color: AppColors.primaryAccent,
-                                fontWeight: FontWeight.w600,
+                  child: StreamBuilder(
+                    stream: PocketBaseAuthService().authStateStream,
+                    builder: (context, _) {
+                      final auth = PocketBaseAuthService();
+                      final isLoggedIn = auth.isLoggedIn;
+                      final name = isLoggedIn ? auth.userName : 'Umut Aktepe';
+                      final email = isLoggedIn ? auth.userEmail : 'ScreenVault Explorer • Yerel Mod';
+
+                      return Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                        child: InkWell(
+                          onTap: () async {
+                            if (!isLoggedIn) {
+                              await AuthScreen.navigate(context);
+                              if (mounted) setState(() {});
+                            }
+                          },
+                          borderRadius: BorderRadius.circular(16),
+                          child: Row(
+                            children: [
+                              UserAvatar(
+                                radius: 32,
+                                borderColor: isLoggedIn ? AppColors.functionalSuccess : AppColors.primaryAccent,
+                                fallbackText: name,
                               ),
-                            ),
-                          ],
+                              const SizedBox(width: 16),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      children: [
+                                        Flexible(
+                                          child: Text(
+                                            name,
+                                            style: AppTypography.headline2,
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                        ),
+                                        if (isLoggedIn) ...[
+                                          const SizedBox(width: 6),
+                                          const Icon(Icons.verified_rounded, color: AppColors.functionalSuccess, size: 18),
+                                        ],
+                                      ],
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      isLoggedIn ? email : 'Giriş yapmak için dokunun • Yerel Mod',
+                                      style: AppTypography.bodySmall.copyWith(
+                                        color: isLoggedIn ? AppColors.primaryAccent : AppColors.secondarySlate,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              if (!isLoggedIn)
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                  decoration: BoxDecoration(
+                                    color: AppColors.primaryAccent.withValues(alpha: 0.15),
+                                    borderRadius: BorderRadius.circular(12),
+                                    border: Border.all(color: AppColors.primaryAccent, width: 0.8),
+                                  ),
+                                  child: Text(
+                                    'Giriş Yap',
+                                    style: AppTypography.bodySmall.copyWith(
+                                      color: AppColors.primaryAccent,
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 11,
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ),
                         ),
-                      ],
-                    ),
+                      );
+                    },
                   ),
                 ),
 
@@ -204,6 +258,13 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 // Rewatch Rail
                 SliverToBoxAdapter(
                   child: RewatchRail(rewatchedShows: stats.rewatchedShows),
+                ),
+
+                const SliverToBoxAdapter(child: SizedBox(height: 20)),
+
+                // PocketBase Cloud Sync Section
+                const SliverToBoxAdapter(
+                  child: CloudSyncCard(),
                 ),
 
                 const SliverToBoxAdapter(child: SizedBox(height: 20)),

@@ -4,9 +4,9 @@ import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_typography.dart';
 import '../../../data/database/database_service.dart';
 import '../../../data/models/show_model.dart';
-import '../../../data/models/episode_model.dart';
 import '../../../data/models/movie_model.dart';
 import '../episode_detail/episode_detail_screen.dart';
+import '../show_detail/show_detail_screen.dart';
 import 'widgets/up_next_card.dart';
 import 'widgets/watchlist_item_tile.dart';
 
@@ -40,7 +40,7 @@ class _WatchlistScreenState extends State<WatchlistScreen> {
         child: CustomScrollView(
           physics: const BouncingScrollPhysics(),
           slivers: [
-            // Top App Bar: "Trackr" + Avatar + Segmented Switcher
+            // Top App Bar: "ScreenVault" + Avatar + Segmented Switcher
             SliverToBoxAdapter(
               child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -50,7 +50,7 @@ class _WatchlistScreenState extends State<WatchlistScreen> {
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
                         Text(
-                          'Trackr',
+                          'ScreenVault',
                           style: AppTypography.headline1.copyWith(
                             color: AppColors.textPrimary,
                             letterSpacing: -0.5,
@@ -181,27 +181,10 @@ class _WatchlistScreenState extends State<WatchlistScreen> {
                         return WatchlistItemTile(
                           show: show,
                           onTap: () {
-                            final showEpisodes = _dbService.getEpisodesForShow(show.id);
-                            final ep = showEpisodes.firstWhere(
-                              (e) => !e.isWatched,
-                              orElse: () => showEpisodes.isNotEmpty
-                                  ? showEpisodes.first
-                                  : EpisodeModel(
-                                      id: show.id * 1000 + 1,
-                                      showId: show.id,
-                                      seasonId: 1,
-                                      seasonNumber: 1,
-                                      episodeNumber: 1,
-                                      name: '${show.name} - 1. Bölüm',
-                                      overview: show.overview,
-                                      stillPath: show.backdropPath,
-                                    ),
-                            );
                             Navigator.of(context).push(
                               MaterialPageRoute(
-                                builder: (context) => EpisodeDetailScreen(
+                                builder: (context) => ShowDetailScreen(
                                   show: show,
-                                  episode: ep,
                                 ),
                               ),
                             );

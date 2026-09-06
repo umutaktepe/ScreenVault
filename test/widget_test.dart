@@ -9,7 +9,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 200));
 
     expect(find.byType(MainNavigationShell), findsOneWidget);
-    expect(find.text('Trackr'), findsOneWidget);
+    expect(find.text('ScreenVault'), findsOneWidget);
     expect(find.text('Watchlist'), findsOneWidget);
     expect(find.text('Discover'), findsOneWidget);
   });
