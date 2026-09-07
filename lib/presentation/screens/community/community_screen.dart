@@ -80,20 +80,15 @@ class _CommunityScreenState extends State<CommunityScreen> {
       if (mounted) {
         setState(() {
           _isLoading = false;
-          if (remote.isNotEmpty) {
-            final remoteIds = remote.map((e) => e.id).toSet();
-            _activities = [
-              ...remote,
-              ..._mockActivities.where((a) => !remoteIds.contains(a.id)),
-            ];
-          } else {
-            _activities = List.from(_mockActivities);
-          }
+          _activities = remote;
         });
       }
     } catch (e) {
       if (mounted) {
-        setState(() => _isLoading = false);
+        setState(() {
+          _isLoading = false;
+          _activities = [];
+        });
       }
     }
   }
@@ -102,9 +97,9 @@ class _CommunityScreenState extends State<CommunityScreen> {
   Widget build(BuildContext context) {
     final friends = _dbService.getFriends();
 
-    return Scaffold(
-      backgroundColor: AppColors.canvasBase,
-      body: SafeArea(
+    return ColoredBox(
+      color: AppColors.canvasBase,
+      child: SafeArea(
         bottom: false,
         child: RefreshIndicator(
           color: AppColors.primaryAccent,
@@ -281,6 +276,40 @@ class _CommunityScreenState extends State<CommunityScreen> {
                   ),
                 ),
               ),
+
+              if (_activities.isEmpty && !_isLoading)
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 48),
+                    child: Column(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.all(16),
+                          decoration: const BoxDecoration(
+                            color: AppColors.surfaceHighlight,
+                            shape: BoxShape.circle,
+                          ),
+                          child: const Icon(
+                            Icons.forum_outlined,
+                            color: AppColors.secondarySlate,
+                            size: 36,
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        Text(
+                          'Henüz Topluluk Aktivitesi Yok',
+                          style: AppTypography.headline3.copyWith(color: AppColors.textPrimary),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          'PocketBase sunucusuna bağlandığınızda veya arkadaşlarınız aktivite paylaştığında burada görünecektir.',
+                          textAlign: TextAlign.center,
+                          style: AppTypography.bodySmall.copyWith(color: AppColors.textSecondary),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
 
               // Activity Cards Stream
               SliverList(

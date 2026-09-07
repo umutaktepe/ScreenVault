@@ -90,9 +90,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: AppColors.canvasBase,
-      body: SafeArea(
+    return ColoredBox(
+      color: AppColors.canvasBase,
+      child: SafeArea(
         bottom: false,
         child: StreamBuilder<UserStatsModel>(
           stream: _dbService.statsStream,

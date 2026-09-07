@@ -18,6 +18,7 @@ class FloatingFrostedNavBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return SafeArea(
+      maintainBottomViewPadding: true,
       child: Padding(
         padding: const EdgeInsets.only(left: 20, right: 20, bottom: 16),
         child: ClipRRect(

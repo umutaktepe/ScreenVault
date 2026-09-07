@@ -318,6 +318,7 @@ class _AuthScreenState extends State<AuthScreen> with SingleTickerProviderStateM
                 Expanded(
                   child: SingleChildScrollView(
                     physics: const BouncingScrollPhysics(),
+                    keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
                     padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.center,

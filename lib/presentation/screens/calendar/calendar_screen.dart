@@ -23,9 +23,9 @@ class _CalendarScreenState extends State<CalendarScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: AppColors.canvasBase,
-      body: SafeArea(
+    return ColoredBox(
+      color: AppColors.canvasBase,
+      child: SafeArea(
         bottom: false,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -96,40 +96,92 @@ class _CalendarScreenState extends State<CalendarScreen> {
               child: Builder(
                 builder: (context) {
                   final db = DatabaseService();
-                  final behzat = db.getShowById(2);
-                  final dark = db.getShowById(3);
-                  final succession = db.getShowById(4);
+                  final followedShows = db.getFollowedShows();
+                  final followedIds = followedShows.map((s) => s.id).toSet();
+                  final allEps = db.getAllEpisodes();
 
-                  return ListView(
+                  // Filter real episodes for followed shows
+                  final List<Map<String, dynamic>> realUpcoming = [];
+                  for (final ep in allEps) {
+                    if (followedIds.contains(ep.showId) && !ep.isWatched) {
+                      final show = followedShows.firstWhere((s) => s.id == ep.showId);
+                      realUpcoming.add({
+                        'show': show,
+                        'episode': ep,
+                        'airDate': ep.airDate ?? DateTime.now(),
+                      });
+                    }
+                  }
+
+                  realUpcoming.sort((a, b) => (a['airDate'] as DateTime).compareTo(b['airDate'] as DateTime));
+
+                  if (realUpcoming.isEmpty) {
+                    return Center(
+                      child: Padding(
+                        padding: const EdgeInsets.all(32),
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.all(16),
+                              decoration: const BoxDecoration(
+                                color: AppColors.surfaceHighlight,
+                                shape: BoxShape.circle,
+                              ),
+                              child: const Icon(
+                                Icons.event_available_rounded,
+                                color: AppColors.secondarySlate,
+                                size: 36,
+                              ),
+                            ),
+                            const SizedBox(height: 16),
+                            Text(
+                              'Yaklaşan Yeni Bölüm Yok',
+                              style: AppTypography.headline3.copyWith(color: AppColors.textPrimary),
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              'Takip ettiğiniz dizilerin yeni bölümleri yayınlandıkça takviminizde burada listelenecektir.',
+                              textAlign: TextAlign.center,
+                              style: AppTypography.bodySmall.copyWith(color: AppColors.textSecondary),
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  }
+
+                  return ListView.builder(
                     physics: const BouncingScrollPhysics(),
                     padding: const EdgeInsets.symmetric(horizontal: 16),
-                    children: [
-                      _buildReleaseCard(
-                        showTitle: 'Behzat Ç.',
-                        episodeCode: 'S05 · E01',
-                        episodeTitle: 'Yeni Bir Başlangıç',
-                        airDate: DateTime.now(),
-                        network: 'BluTV',
-                        posterPath: behzat?.posterPath,
-                      ),
-                      _buildReleaseCard(
-                        showTitle: 'Dark: Reunion',
-                        episodeCode: 'S01 · E01',
-                        episodeTitle: 'The Beginning is the End',
-                        airDate: DateTime.now().add(const Duration(days: 2)),
-                        network: 'Netflix',
-                        posterPath: dark?.posterPath ?? '/apbrbWs8M9lyOpJYU5WXrpFbk1Z.jpg',
-                      ),
-                      _buildReleaseCard(
-                        showTitle: 'Succession: The Board',
-                        episodeCode: 'S05 · E01',
-                        episodeTitle: 'Waystar Global',
-                        airDate: DateTime.now().add(const Duration(days: 4)),
-                        network: 'HBO Max',
-                        posterPath: succession?.posterPath,
-                      ),
-                      const SizedBox(height: 100), // padding for navbar
-                    ],
+                    itemCount: realUpcoming.length + 1, // +1 for navbar padding
+                    itemBuilder: (context, index) {
+                      if (index == realUpcoming.length) {
+                        return const SizedBox(height: 100);
+                      }
+                      final item = realUpcoming[index];
+                      final show = item['show'] as ShowModel;
+                      final ep = item['episode'] as EpisodeModel;
+                      return _buildReleaseCard(
+                        showTitle: show.name,
+                        episodeCode: ep.code,
+                        episodeTitle: ep.name,
+                        airDate: ep.airDate ?? (item['airDate'] as DateTime),
+                        network: show.genres.isNotEmpty ? show.genres.first : 'TV Series',
+                        posterPath: show.posterPath,
+                        onTap: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => EpisodeDetailScreen(
+                                show: show,
+                                episode: ep,
+                              ),
+                            ),
+                          );
+                        },
+                      );
+                    },
                   );
                 },
               ),
@@ -173,9 +225,10 @@ class _CalendarScreenState extends State<CalendarScreen> {
     required DateTime airDate,
     required String network,
     String? posterPath,
+    VoidCallback? onTap,
   }) {
     return GestureDetector(
-      onTap: () {
+      onTap: onTap ?? () {
         final sampleShow = ShowModel(
           id: 99,
           name: showTitle,

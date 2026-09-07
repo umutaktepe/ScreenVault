@@ -17,38 +17,53 @@ class MainNavigationShell extends StatefulWidget {
 
 class _MainNavigationShellState extends State<MainNavigationShell> {
   int _currentIndex = 0;
-
-  void _onTabSelected(int index) {
-    setState(() => _currentIndex = index);
-  }
+  late final List<Widget> _screens;
 
   @override
-  Widget build(BuildContext context) {
-    final screens = [
+  void initState() {
+    super.initState();
+    _screens = [
       WatchlistScreen(onProfileTap: () => _onTabSelected(4)),
       const CalendarScreen(),
       const DiscoverScreen(),
       const CommunityScreen(),
       const ProfileScreen(),
     ];
+  }
 
+  void _onTabSelected(int index) {
+    if (_currentIndex != index) {
+      FocusManager.instance.primaryFocus?.unfocus();
+      setState(() => _currentIndex = index);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     return Scaffold(
+      resizeToAvoidBottomInset: false,
       backgroundColor: AppColors.canvasBase,
       body: Stack(
         children: [
           // Screen contents
-          IndexedStack(
-            index: _currentIndex,
-            children: screens,
+          MediaQuery.removeViewInsets(
+            context: context,
+            removeBottom: true,
+            child: IndexedStack(
+              index: _currentIndex,
+              children: _screens,
+            ),
           ),
           // 5-Tab Floating Frosted Glass Dock
           Positioned(
             left: 0,
             right: 0,
             bottom: 0,
-            child: FloatingFrostedNavBar(
-              currentIndex: _currentIndex,
-              onTabSelected: _onTabSelected,
+            child: RepaintBoundary(
+              child: FloatingFrostedNavBar(
+                currentIndex: _currentIndex,
+                onTabSelected: _onTabSelected,
+              ),
             ),
           ),
         ],

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import '../../../core/config/tmdb_config.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_typography.dart';
 import '../../../data/tmdb/tmdb_service.dart';
@@ -19,10 +20,13 @@ class DiscoverScreen extends StatefulWidget {
   State<DiscoverScreen> createState() => _DiscoverScreenState();
 }
 
-class _DiscoverScreenState extends State<DiscoverScreen> {
+class _DiscoverScreenState extends State<DiscoverScreen> with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
   final TmdbService _tmdbService = TmdbService();
   final DatabaseService _dbService = DatabaseService();
   final TextEditingController _searchController = TextEditingController();
+  final FocusNode _searchFocusNode = FocusNode();
 
   List<dynamic> _trendingItems = [];
   List<dynamic> _searchResults = [];
@@ -41,6 +45,7 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
 
   @override
   void dispose() {
+    _searchFocusNode.dispose();
     _searchController.dispose();
     _debounce?.cancel();
     _tmdbService.dispose();
@@ -114,7 +119,7 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
       return;
     }
 
-    _debounce = Timer(const Duration(milliseconds: 500), () async {
+    _debounce = Timer(const Duration(milliseconds: 350), () async {
       setState(() => _isSearching = true);
       final results = await _tmdbService.searchMulti(query);
       if (mounted) {
@@ -152,18 +157,21 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
 
   @override
   Widget build(BuildContext context) {
+    super.build(context);
     final hasSearchQuery = _searchController.text.trim().isNotEmpty;
 
-    return Scaffold(
-      backgroundColor: AppColors.canvasBase,
-      body: SafeArea(
-        bottom: false,
-        child: CustomScrollView(
-          physics: const BouncingScrollPhysics(),
-          slivers: [
-            // Top Bar: "Discover" + Live Search Bar
-            SliverToBoxAdapter(
-              child: Padding(
+    return ColoredBox(
+      color: AppColors.canvasBase,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () => _searchFocusNode.unfocus(),
+        child: SafeArea(
+          bottom: false,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Pinned Top Bar: "Discover" + Live Search Bar
+              Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -174,42 +182,57 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
                     ),
                     const SizedBox(height: 14),
                     // Live TMDB v3 Search Input
-                    Container(
-                      decoration: BoxDecoration(
-                        color: AppColors.cardSurface,
-                        borderRadius: BorderRadius.circular(16),
-                        border: Border.all(color: AppColors.borderStroke, width: 1),
-                      ),
-                      child: TextField(
-                        controller: _searchController,
-                        onChanged: _onSearchChanged,
-                        style: AppTypography.bodyLarge,
-                        cursorColor: AppColors.primaryAccent,
-                        decoration: InputDecoration(
-                          hintText: 'Dizi, film veya oyuncu ara...',
-                          hintStyle: AppTypography.bodyMedium,
-                          prefixIcon: const Icon(
-                            Icons.search_rounded,
-                            color: AppColors.secondarySlate,
-                          ),
-                          suffixIcon: _searchController.text.isNotEmpty
-                              ? IconButton(
+                    RepaintBoundary(
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: AppColors.cardSurface,
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(color: AppColors.borderStroke, width: 1),
+                        ),
+                        child: TextField(
+                          controller: _searchController,
+                          focusNode: _searchFocusNode,
+                          textInputAction: TextInputAction.search,
+                          onSubmitted: (_) => _searchFocusNode.unfocus(),
+                          onChanged: _onSearchChanged,
+                          style: AppTypography.bodyLarge,
+                          cursorColor: AppColors.primaryAccent,
+                          decoration: InputDecoration(
+                            hintText: 'Dizi, film veya oyuncu ara...',
+                            hintStyle: AppTypography.bodyMedium,
+                            prefixIcon: const Icon(
+                              Icons.search_rounded,
+                              color: AppColors.secondarySlate,
+                            ),
+                            suffixIcon: ValueListenableBuilder<TextEditingValue>(
+                              valueListenable: _searchController,
+                              builder: (context, value, child) {
+                                if (value.text.isEmpty) return const SizedBox.shrink();
+                                return IconButton(
                                   icon: const Icon(Icons.clear_rounded, color: AppColors.secondarySlate),
                                   onPressed: () {
                                     _searchController.clear();
                                     _onSearchChanged('');
                                   },
-                                )
-                              : null,
-                          border: InputBorder.none,
-                          contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                                );
+                              },
+                            ),
+                            border: InputBorder.none,
+                            contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                          ),
                         ),
                       ),
                     ),
                   ],
                 ),
               ),
-            ),
+
+              // Scrollable Content
+              Expanded(
+                child: CustomScrollView(
+                  keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+                  physics: const BouncingScrollPhysics(),
+                  slivers: [
 
             if (hasSearchQuery) ...[
               // Search Results Section
@@ -237,14 +260,49 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
                 ),
               ),
 
-              if (_searchResults.isEmpty && !_isSearching)
+              if (_isSearching)
                 const SliverToBoxAdapter(
                   child: Padding(
-                    padding: EdgeInsets.all(32),
+                    padding: EdgeInsets.symmetric(vertical: 48),
                     child: Center(
-                      child: Text(
-                        'Sonuç bulunamadı.',
-                        style: TextStyle(color: AppColors.secondarySlate),
+                      child: CircularProgressIndicator(
+                        valueColor: AlwaysStoppedAnimation(AppColors.primaryAccent),
+                      ),
+                    ),
+                  ),
+                )
+              else if (_searchResults.isEmpty)
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 48),
+                    child: Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            !TmdbConfig().hasValidKey ? Icons.vpn_key_off_rounded : Icons.search_off_rounded,
+                            size: 48,
+                            color: AppColors.secondarySlate,
+                          ),
+                          const SizedBox(height: 14),
+                          Text(
+                            !TmdbConfig().hasValidKey
+                                ? 'TMDB API Anahtarı Tanımlı Değil'
+                                : 'Sonuç Bulunamadı',
+                            style: AppTypography.headline3.copyWith(fontSize: 16),
+                            textAlign: TextAlign.center,
+                          ),
+                          const SizedBox(height: 6),
+                          Text(
+                            !TmdbConfig().hasValidKey
+                                ? 'Arama yapabilmek için Profil > Sunucu & API Ayarları bölümünden TMDB anahtarınızı kontrol edin.'
+                                : 'Farklı bir dizi/film adı veya orijinal başlığıyla aramayı deneyebilirsiniz.',
+                            style: AppTypography.bodySmall.copyWith(
+                              color: AppColors.secondarySlate,
+                            ),
+                            textAlign: TextAlign.center,
+                          ),
+                        ],
                       ),
                     ),
                   ),
@@ -369,11 +427,15 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
                 ),
             ],
 
-            const SliverToBoxAdapter(child: SizedBox(height: 100)),
+            const SliverToBoxAdapter(child: SizedBox(height: 120)),
           ],
         ),
       ),
-    );
+    ],
+  ),
+),
+),
+);
   }
 
   Widget _buildSearchResultTile(dynamic item) {

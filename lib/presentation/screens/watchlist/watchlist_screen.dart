@@ -33,9 +33,9 @@ class _WatchlistScreenState extends State<WatchlistScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: AppColors.canvasBase,
-      body: SafeArea(
+    return ColoredBox(
+      color: AppColors.canvasBase,
+      child: SafeArea(
         bottom: false,
         child: CustomScrollView(
           physics: const BouncingScrollPhysics(),
