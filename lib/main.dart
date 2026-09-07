@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'core/config/tmdb_config.dart';
 import 'core/theme/obsidian_theme.dart';
 import 'core/network/pocketbase_client.dart';
 import 'data/sync/pocketbase_sync_engine.dart';
@@ -18,6 +19,9 @@ void main() async {
       systemNavigationBarIconBrightness: Brightness.light,
     ),
   );
+
+  // Initialize TMDB Configuration (SharedPreferences & Environment)
+  await TmdbConfig().initialize();
 
   // Initialize Database Service
   await DatabaseService().init();

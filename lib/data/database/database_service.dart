@@ -109,7 +109,32 @@ class DatabaseService {
       }
 
       for (final s in _shows.values) {
-        final tmdbId = (s.id == 2 || s.tvdbId == 235881 || s.name.contains('Behzat')) ? 39176 : s.tmdbId;
+        final isOriginalBehzat = (s.tvdbId == 235881 || (s.id == 2 && s.name == 'Behzat Ç.'));
+        int? tmdbId = isOriginalBehzat ? 39176 : s.tmdbId;
+
+        // If corrupted by old bug, clear it
+        if (tmdbId == 39176 && !isOriginalBehzat) {
+          tmdbId = null;
+        }
+
+        // Dynamically resolve missing TMDB ID
+        if (tmdbId == null || tmdbId <= 0) {
+          if (s.tvdbId != null && s.tvdbId! > 0) {
+            final found = await _tmdbService.findTvShowByTvdbId(s.tvdbId!);
+            if (found != null && found.tmdbId != null) {
+              tmdbId = found.tmdbId;
+              await upsertShow(s.copyWith(tmdbId: tmdbId));
+            }
+          }
+          if (tmdbId == null || tmdbId <= 0) {
+            final found = await _tmdbService.searchTvShowByName(s.name);
+            if (found != null && found.tmdbId != null) {
+              tmdbId = found.tmdbId;
+              await upsertShow(s.copyWith(tmdbId: tmdbId));
+            }
+          }
+        }
+
         if (tmdbId == null || tmdbId <= 0) continue;
         final showEps = _episodes.values.where((e) => e.showId == s.id).toList();
         if (showEps.isEmpty) continue;
@@ -186,15 +211,120 @@ class DatabaseService {
     } else {
       await _loadFromDb(existingShows);
     }
+    await _cleanCorruptedMockData();
     unawaited(enrichAllMissingMetadata());
+  }
+
+  /// Cleanses any corrupted mock data, resolves TVDB IDs to TMDB IDs via API,
+  /// and purges orphan seasons/episodes across all shows.
+  Future<void> _cleanCorruptedMockData() async {
+    // 1. Reconcile shows that have a TVDB ID but missing or wrong TMDB ID
+    for (final show in _shows.values.toList()) {
+      final tvdbId = show.tvdbId;
+      if (tvdbId != null && tvdbId > 0) {
+        final isOriginalBehzat = (tvdbId == 235881 || (show.id == 2 && show.name == 'Behzat Ç.'));
+        final isWrongTmdb = !isOriginalBehzat && show.tmdbId == 39176;
+
+        if (show.tmdbId == null || isWrongTmdb) {
+          try {
+            final resolved = await _tmdbService.findTvShowByTvdbId(tvdbId);
+            if (resolved != null && resolved.tmdbId != null) {
+              final updated = show.copyWith(
+                tmdbId: resolved.tmdbId,
+                totalSeasons: resolved.totalSeasons > 0 ? resolved.totalSeasons : show.totalSeasons,
+                totalEpisodes: resolved.totalEpisodes > 0 ? resolved.totalEpisodes : show.totalEpisodes,
+                posterPath: resolved.posterPath ?? show.posterPath,
+                backdropPath: resolved.backdropPath ?? show.backdropPath,
+                name: resolved.name.isNotEmpty ? resolved.name : show.name,
+              );
+              await upsertShow(updated);
+
+              // If wrong 39176 episodes were attached to another show, purge them
+              if (isWrongTmdb) {
+                final badEps = _episodes.values
+                    .where((e) => e.showId == show.id && (e.tmdbId == 39176 || e.name.contains('Pilot') || e.name.contains('Gece Uçuşu') || e.runtimeMinutes >= 90))
+                    .toList();
+                for (final bad in badEps) {
+                  _episodes.remove(bad.id);
+                  await (_db.delete(_db.episodesTable)..where((t) => t.id.equals(bad.id))).go();
+                }
+              }
+            }
+          } catch (_) {}
+        }
+      }
+    }
+
+    // 2. Reconcile watch records: Link any watch record that has a tvdbId to its matching show
+    for (int i = 0; i < _watchRecords.length; i++) {
+      final r = _watchRecords[i];
+      final rTvdb = r.tvdbId ?? r.sId;
+      if (rTvdb != null && rTvdb > 0) {
+        final matchingShow = _shows.values.cast<ShowModel?>().firstWhere(
+              (s) => s != null && (s.tvdbId == rTvdb || s.id == rTvdb),
+              orElse: () => null,
+            );
+        if (matchingShow != null && r.showId != matchingShow.id) {
+          final fixed = r.copyWith(showId: matchingShow.id, tvdbId: rTvdb);
+          _watchRecords[i] = fixed;
+          await (_db.update(_db.episodeWatchHistoryTable)..where((t) => t.id.equals(r.id))).write(
+            EpisodeWatchHistoryTableCompanion(
+              showId: Value(matchingShow.id),
+              tvdbId: Value(rTvdb),
+            ),
+          );
+        }
+      }
+    }
+
+    // 3. Purge excess seasons and episodes for any show where totalSeasons > 0
+    // Also fix Behzat Ç. (Show 2) if totalSeasons was mistakenly 5
+    final behzatShow = _shows[2];
+    if (behzatShow != null && behzatShow.name == 'Behzat Ç.' && behzatShow.totalSeasons > 4) {
+      await upsertShow(behzatShow.copyWith(totalSeasons: 4));
+    }
+
+    for (final show in _shows.values.toList()) {
+      if (show.totalSeasons > 0) {
+        final excessSeasons = _seasons.values
+            .where((s) => s.showId == show.id && (s.seasonNumber > show.totalSeasons || s.seasonNumber <= 0))
+            .toList();
+        for (final s in excessSeasons) {
+          _seasons.remove(s.id);
+          await (_db.delete(_db.seasonsTable)..where((t) => t.id.equals(s.id))).go();
+        }
+
+        final excessEps = _episodes.values
+            .where((e) => e.showId == show.id && (e.seasonNumber > show.totalSeasons || e.seasonNumber <= 0))
+            .toList();
+        for (final e in excessEps) {
+          _episodes.remove(e.id);
+          await (_db.delete(_db.episodesTable)..where((t) => t.id.equals(e.id))).go();
+        }
+      }
+
+      // Purge any empty seasons that have 0 episodeCount and 0 local episodes
+      final emptyStoredSeasons = _seasons.values
+          .where((s) =>
+              s.showId == show.id &&
+              s.episodeCount == 0 &&
+              !_episodes.values.any((e) => e.showId == show.id && e.seasonNumber == s.seasonNumber))
+          .toList();
+      for (final emptyS in emptyStoredSeasons) {
+        _seasons.remove(emptyS.id);
+        await (_db.delete(_db.seasonsTable)..where((t) => t.id.equals(emptyS.id))).go();
+      }
+    }
   }
 
   Future<void> _loadFromDb(List<ShowsTableData> existingShows) async {
     _shows.clear();
     for (final s in existingShows) {
-      final effectiveTmdbId = (s.id == 2 || s.tvdbId == 235881 || s.name.contains('Behzat'))
-          ? 39176
-          : s.tmdbId;
+      final isOriginalBehzat = (s.tvdbId == 235881 || (s.id == 2 && s.name == 'Behzat Ç.'));
+      int? effectiveTmdbId = isOriginalBehzat ? 39176 : s.tmdbId;
+      if (effectiveTmdbId == 39176 && !isOriginalBehzat) {
+        effectiveTmdbId = null;
+      }
       _shows[s.id] = ShowModel(
         id: s.id,
         tmdbId: effectiveTmdbId,
@@ -354,7 +484,7 @@ class DatabaseService {
       posterPath: null,
       backdropPath: null,
       status: 'Returning Series',
-      totalSeasons: 5,
+      totalSeasons: 4,
       totalEpisodes: 105,
       genres: ['Crime', 'Drama', 'Mystery'],
       isFollowed: true,
@@ -512,7 +642,7 @@ class DatabaseService {
     }
 
     // 1. Behzat Ç. (id: 2, tvdbId: 235881, tmdbId: 39176)
-    final behzatShow = _shows.values.where((s) => s.id == 2 || s.tvdbId == 235881 || s.name.contains('Behzat')).firstOrNull;
+    final behzatShow = _shows.values.where((s) => s.tvdbId == 235881 || (s.id == 2 && s.name == 'Behzat Ç.')).firstOrNull;
     if (behzatShow != null && behzatShow.tmdbId != 39176) {
       final updatedShow = behzatShow.copyWith(tmdbId: 39176);
       _shows[updatedShow.id] = updatedShow;
@@ -572,12 +702,25 @@ class DatabaseService {
     // 1. Backfill any missing episodes from watch records into _episodes
     for (final r in _watchRecords.toList()) {
       if (r.seasonNumber <= 0 || r.episodeNumber <= 0) continue;
-      final show = getShowById(r.showId ?? r.tvdbId ?? r.sId ?? 0);
-      final targetShowId = show?.id ?? r.showId ?? 0;
+      final rTvdb = r.tvdbId ?? r.sId;
+
+      ShowModel? show;
+      if (rTvdb != null && rTvdb > 0) {
+        show = _shows.values.cast<ShowModel?>().firstWhere(
+              (s) => s != null && (s.tvdbId == rTvdb || s.id == rTvdb),
+              orElse: () => null,
+            );
+      }
+      show ??= getShowById(r.showId ?? 0);
+
+      final targetShowId = show?.id ?? r.showId ?? rTvdb ?? 0;
       if (targetShowId == 0) continue;
 
       // S01E36 of Behzat Ç. must remain unwatched (Up Next)
       if (targetShowId == 2 && r.seasonNumber == 1 && r.episodeNumber == 36) continue;
+
+      // Do not create episodes for seasons exceeding show's known total seasons
+      if (show != null && show.totalSeasons > 0 && r.seasonNumber > show.totalSeasons) continue;
 
       final existing = _episodes.values.where((e) =>
           e.showId == targetShowId &&
@@ -1298,16 +1441,22 @@ class DatabaseService {
     final Map<int, SeasonModel> seasonMap = {};
     for (final s in stored) {
       if (s.seasonNumber > 0) {
-        seasonMap[s.seasonNumber] = s;
+        final hasLocalEps = _episodes.values.any(
+          (e) => (e.showId == targetShowId || e.showId == showId) && e.seasonNumber == s.seasonNumber,
+        );
+        if (s.episodeCount > 0 || hasLocalEps) {
+          seasonMap[s.seasonNumber] = s;
+        }
       }
     }
 
-    final total = count > 0
-        ? count
-        : (seasonMap.keys.isNotEmpty ? seasonMap.keys.reduce((a, b) => a > b ? a : b) : 1);
+    if (count > 0) {
+      seasonMap.removeWhere((seasonNum, _) => seasonNum > count);
+    }
 
-    for (int i = 1; i <= total; i++) {
-      if (!seasonMap.containsKey(i)) {
+    // Only synthesize placeholder seasons if stored had absolutely NOTHING (first load fallback before API)
+    if (seasonMap.isEmpty && count > 0) {
+      for (int i = 1; i <= count; i++) {
         seasonMap[i] = SeasonModel(
           id: targetShowId * 100 + i,
           showId: targetShowId,
@@ -1324,16 +1473,89 @@ class DatabaseService {
 
   Future<List<SeasonModel>> fetchOrLoadSeasons(ShowModel show) async {
     final local = getSeasonsForShow(show.id);
-    final tmdbId = (show.id == 2 || show.tvdbId == 235881 || show.name.contains('Behzat'))
-        ? 39176
-        : show.tmdbId;
+    final isOriginalBehzat = (show.tvdbId == 235881 || (show.id == 2 && show.name == 'Behzat Ç.'));
+    int? tmdbId = isOriginalBehzat ? 39176 : show.tmdbId;
+
+    if (tmdbId == 39176 && !isOriginalBehzat) {
+      tmdbId = null;
+    }
+
+    // If tmdbId is missing or wrong, dynamically resolve from TMDB
+    if (tmdbId == null || tmdbId <= 0) {
+      if (show.tvdbId != null && show.tvdbId! > 0) {
+        final found = await _tmdbService.findTvShowByTvdbId(show.tvdbId!);
+        if (found != null && found.tmdbId != null) {
+          tmdbId = found.tmdbId;
+          final updated = show.copyWith(
+            tmdbId: tmdbId,
+            posterPath: found.posterPath ?? show.posterPath,
+            backdropPath: found.backdropPath ?? show.backdropPath,
+            overview: (show.overview == null || show.overview!.isEmpty) ? found.overview : show.overview,
+            totalSeasons: found.totalSeasons > 0 ? found.totalSeasons : show.totalSeasons,
+            totalEpisodes: found.totalEpisodes > 0 ? found.totalEpisodes : show.totalEpisodes,
+          );
+          await upsertShow(updated);
+        }
+      }
+      if (tmdbId == null || tmdbId <= 0) {
+        final found = await _tmdbService.searchTvShowByName(show.name);
+        if (found != null && found.tmdbId != null) {
+          tmdbId = found.tmdbId;
+          final updated = show.copyWith(
+            tmdbId: tmdbId,
+            posterPath: found.posterPath ?? show.posterPath,
+            backdropPath: found.backdropPath ?? show.backdropPath,
+            overview: (show.overview == null || show.overview!.isEmpty) ? found.overview : show.overview,
+            totalSeasons: found.totalSeasons > 0 ? found.totalSeasons : show.totalSeasons,
+            totalEpisodes: found.totalEpisodes > 0 ? found.totalEpisodes : show.totalEpisodes,
+          );
+          await upsertShow(updated);
+        }
+      }
+    }
+
     if (tmdbId != null && tmdbId > 0) {
       try {
         final tmdbSeasons = await _tmdbService.getShowSeasons(tmdbId, showInternalId: show.id);
-        if (tmdbSeasons.isNotEmpty) {
-          for (final s in tmdbSeasons) {
+        final validSeasons = tmdbSeasons.where((s) => s.seasonNumber > 0 && s.episodeCount > 0).toList();
+        if (validSeasons.isNotEmpty) {
+          final maxSeason = validSeasons.map((s) => s.seasonNumber).reduce((a, b) => a > b ? a : b);
+          final validSeasonNumbers = validSeasons.map((s) => s.seasonNumber).toSet();
+
+          // Purge any local seasons whose seasonNumber is not in validSeasonNumbers
+          final badSeasons = _seasons.values
+              .where((s) =>
+                  (s.showId == show.id ||
+                      (show.tvdbId != null && s.showId == show.tvdbId) ||
+                      (show.tmdbId != null && s.showId == show.tmdbId)) &&
+                  (!validSeasonNumbers.contains(s.seasonNumber) || s.seasonNumber <= 0))
+              .toList();
+          for (final bad in badSeasons) {
+            _seasons.remove(bad.id);
+            unawaited((_db.delete(_db.seasonsTable)..where((t) => t.id.equals(bad.id))).go());
+          }
+
+          // Purge any episodes belonging to deleted seasons
+          final badEps = _episodes.values
+              .where((e) =>
+                  (e.showId == show.id ||
+                      (show.tvdbId != null && e.showId == show.tvdbId) ||
+                      (show.tmdbId != null && e.showId == show.tmdbId)) &&
+                  (!validSeasonNumbers.contains(e.seasonNumber) || e.seasonNumber <= 0))
+              .toList();
+          for (final bad in badEps) {
+            _episodes.remove(bad.id);
+            unawaited((_db.delete(_db.episodesTable)..where((t) => t.id.equals(bad.id))).go());
+          }
+
+          for (final s in validSeasons) {
             await upsertSeason(s);
           }
+
+          if (show.totalSeasons != maxSeason) {
+            await upsertShow(show.copyWith(totalSeasons: maxSeason));
+          }
+
           return getSeasonsForShow(show.id);
         }
       } catch (_) {}
@@ -1360,15 +1582,14 @@ class DatabaseService {
       if (r.seasonNumber != seasonNumber || r.episodeNumber != episodeNumber) {
         return false;
       }
+      final rTvdb = r.tvdbId ?? r.sId;
+      // Strict TVDB ID separation
+      if (rTvdb != null && rTvdb > 0 && effectiveTvdbId != null && effectiveTvdbId > 0 && rTvdb != effectiveTvdbId) {
+        return false;
+      }
       if (r.showId != null && (r.showId == targetShowId || r.showId == showId)) return true;
-      if (effectiveTvdbId != null && effectiveTvdbId > 0) {
-        if (r.tvdbId != null && r.tvdbId == effectiveTvdbId) return true;
-        if (r.sId != null && r.sId == effectiveTvdbId) return true;
-      }
-      if (tmdbId != null && tmdbId > 0) {
-        if (r.tvdbId != null && r.tvdbId == tmdbId) return true;
-        if (r.sId != null && r.sId == tmdbId) return true;
-      }
+      if (effectiveTvdbId != null && effectiveTvdbId > 0 && rTvdb == effectiveTvdbId) return true;
+      if (tmdbId != null && tmdbId > 0 && (r.tvdbId == tmdbId || r.sId == tmdbId)) return true;
       if (r.sId != null && (r.sId == targetShowId || r.sId == showId)) return true;
       if (r.tvdbId != null && (r.tvdbId == targetShowId || r.tvdbId == showId)) return true;
       return false;
@@ -1392,15 +1613,14 @@ class DatabaseService {
       if (r.seasonNumber != seasonNumber || r.episodeNumber != episodeNumber) {
         return false;
       }
+      final rTvdb = r.tvdbId ?? r.sId;
+      // Strict TVDB ID separation
+      if (rTvdb != null && rTvdb > 0 && effectiveTvdbId != null && effectiveTvdbId > 0 && rTvdb != effectiveTvdbId) {
+        return false;
+      }
       if (r.showId != null && (r.showId == targetShowId || r.showId == showId)) return true;
-      if (effectiveTvdbId != null && effectiveTvdbId > 0) {
-        if (r.tvdbId != null && r.tvdbId == effectiveTvdbId) return true;
-        if (r.sId != null && r.sId == effectiveTvdbId) return true;
-      }
-      if (tmdbId != null && tmdbId > 0) {
-        if (r.tvdbId != null && r.tvdbId == tmdbId) return true;
-        if (r.sId != null && r.sId == tmdbId) return true;
-      }
+      if (effectiveTvdbId != null && effectiveTvdbId > 0 && rTvdb == effectiveTvdbId) return true;
+      if (tmdbId != null && tmdbId > 0 && (r.tvdbId == tmdbId || r.sId == tmdbId)) return true;
       if (r.sId != null && (r.sId == targetShowId || r.sId == showId)) return true;
       if (r.tvdbId != null && (r.tvdbId == targetShowId || r.tvdbId == showId)) return true;
       return false;
@@ -1498,24 +1718,70 @@ class DatabaseService {
   }
 
   Future<List<EpisodeModel>> fetchOrLoadSeasonEpisodes(ShowModel show, int seasonNumber) async {
-    final isBehzat = show.id == 2 || show.tvdbId == 235881 || show.tmdbId == 39176 || show.name.contains('Behzat');
-    final effectiveTmdbId = isBehzat ? 39176 : show.tmdbId;
+    final isOriginalBehzat = (show.tvdbId == 235881 || (show.id == 2 && show.name == 'Behzat Ç.'));
+    int? effectiveTmdbId = isOriginalBehzat ? 39176 : show.tmdbId;
+    if (effectiveTmdbId == 39176 && !isOriginalBehzat) {
+      effectiveTmdbId = null;
+    }
 
-    if (isBehzat && BehzatMetadata.seasons.containsKey(seasonNumber)) {
-      await _backfillBehzatEpisodesMetadata();
+    if (isOriginalBehzat && BehzatMetadata.seasons.containsKey(seasonNumber)) {
+      final existing = getEpisodesForShowAndSeason(show.id, seasonNumber);
+      if (existing.isEmpty) {
+        await _backfillBehzatEpisodesMetadata();
+      }
+    }
+
+    // Dynamically resolve missing or wrong TMDB ID
+    if (effectiveTmdbId == null || effectiveTmdbId <= 0) {
+      if (show.tvdbId != null && show.tvdbId! > 0) {
+        final found = await _tmdbService.findTvShowByTvdbId(show.tvdbId!);
+        if (found != null && found.tmdbId != null) {
+          effectiveTmdbId = found.tmdbId;
+          final updated = show.copyWith(
+            tmdbId: effectiveTmdbId,
+            totalSeasons: found.totalSeasons > 0 ? found.totalSeasons : show.totalSeasons,
+            totalEpisodes: found.totalEpisodes > 0 ? found.totalEpisodes : show.totalEpisodes,
+            posterPath: found.posterPath ?? show.posterPath,
+            backdropPath: found.backdropPath ?? show.backdropPath,
+          );
+          await upsertShow(updated);
+        }
+      }
+      if (effectiveTmdbId == null || effectiveTmdbId <= 0) {
+        final found = await _tmdbService.searchTvShowByName(show.name);
+        if (found != null && found.tmdbId != null) {
+          effectiveTmdbId = found.tmdbId;
+          final updated = show.copyWith(
+            tmdbId: effectiveTmdbId,
+            totalSeasons: found.totalSeasons > 0 ? found.totalSeasons : show.totalSeasons,
+            totalEpisodes: found.totalEpisodes > 0 ? found.totalEpisodes : show.totalEpisodes,
+          );
+          await upsertShow(updated);
+        }
+      }
     }
 
     final local = getEpisodesForShowAndSeason(show.id, seasonNumber);
-    final bool fullyLoaded = local.length >= 5 &&
-        local.every((e) =>
-            e.stillPath != null &&
-            e.stillPath!.isNotEmpty &&
-            e.runtimeMinutes > 0 &&
-            e.runtimeMinutes != 75 &&
-            e.name.isNotEmpty &&
-            !e.name.startsWith('Episode '));
-    if (fullyLoaded) {
-      return local;
+
+    // If seasonNumber exceeds show's total seasons, purge local and return empty
+    if (show.totalSeasons > 0 && seasonNumber > show.totalSeasons) {
+      for (final bad in local) {
+        _episodes.remove(bad.id);
+        unawaited((_db.delete(_db.episodesTable)..where((t) => t.id.equals(bad.id))).go());
+      }
+      return [];
+    }
+
+    // If not original Behzat, purge any contaminated 39176 episodes
+    if (!isOriginalBehzat) {
+      final contaminated = local.where((e) => e.tmdbId == 39176 || e.name.contains('Pilot') || e.name.contains('Gece Uçuşu')).toList();
+      if (contaminated.isNotEmpty) {
+        for (final bad in contaminated) {
+          _episodes.remove(bad.id);
+          unawaited((_db.delete(_db.episodesTable)..where((t) => t.id.equals(bad.id))).go());
+        }
+        local.removeWhere((e) => e.tmdbId == 39176 || e.name.contains('Pilot') || e.name.contains('Gece Uçuşu'));
+      }
     }
 
     if (effectiveTmdbId != null && effectiveTmdbId > 0) {
@@ -1526,6 +1792,16 @@ class DatabaseService {
           showInternalId: show.id,
         );
         if (tmdbEps.isNotEmpty) {
+          final validEpNumbers = tmdbEps.map((e) => e.episodeNumber).toSet();
+
+          // CRITICAL: Purge any local episodes whose episodeNumber does NOT exist in TMDB's list!
+          // This eliminates old phantom/corrupted mock episodes (e.g. eps 9..38 for a season with 8 eps).
+          final excess = local.where((e) => !validEpNumbers.contains(e.episodeNumber)).toList();
+          for (final ex in excess) {
+            _episodes.remove(ex.id);
+            unawaited((_db.delete(_db.episodesTable)..where((t) => t.id.equals(ex.id))).go());
+          }
+
           for (final ep in tmdbEps) {
             final existing = local.where((e) => e.episodeNumber == ep.episodeNumber);
             final bool existingWatched = existing.isNotEmpty && existing.first.isWatched;
@@ -1535,7 +1811,7 @@ class DatabaseService {
               seasonNumber: seasonNumber,
               episodeNumber: ep.episodeNumber,
             );
-            final bool isWatched = (isBehzat && seasonNumber == 1 && ep.episodeNumber == 36)
+            final bool isWatched = (isOriginalBehzat && seasonNumber == 1 && ep.episodeNumber == 36)
                 ? false
                 : (existingWatched || hasHistory);
 
@@ -1576,6 +1852,13 @@ class DatabaseService {
             );
             await upsertEpisode(toSave);
           }
+
+          // Recalculate show's watched episodes count
+          final watchedCount = getWatchedEpisodesCountForShow(show.id);
+          if (watchedCount != show.watchedEpisodesCount) {
+            await upsertShow(show.copyWith(watchedEpisodesCount: watchedCount));
+          }
+
           return getEpisodesForShowAndSeason(show.id, seasonNumber);
         }
       } catch (_) {
@@ -1671,20 +1954,7 @@ class DatabaseService {
         return unwatched.first;
       }
     }
-    // Fallback sample episode
-    return _episodes.values.firstWhere(
-      (e) => !e.isWatched,
-      orElse: () => const EpisodeModel(
-        id: 999,
-        showId: 2,
-        seasonId: 1,
-        seasonNumber: 1,
-        episodeNumber: 36,
-        name: '36. Bölüm',
-        stillPath: null,
-        runtimeMinutes: 84,
-      ),
-    );
+    return null;
   }
 
   Future<void> markEpisodeWatched(
@@ -1917,29 +2187,101 @@ class DatabaseService {
       totalMinutes = 186576; // 4 Months 9 Days 13 Hours
     }
 
-    return UserStatsModel(
-      totalWatchMinutes: totalMinutes,
-      showsFollowedCount: _shows.values.where((s) => s.isFollowed).length,
-      episodesWatchedCount: 3393,
-      moviesWatchedCount: _movies.length > 2 ? _movies.length : 493,
-      genreDistribution: const {
+    // Dynamic 28 days activity from real watch records
+    final now = DateTime.now();
+    final List<int> activity28Days = List.filled(28, 0);
+    bool hasRecentActivity = false;
+    for (final r in _watchRecords) {
+      final diff = now.difference(r.watchedAt).inDays;
+      if (diff >= 0 && diff < 28) {
+        activity28Days[27 - diff]++;
+        hasRecentActivity = true;
+      }
+    }
+    final finalActivity = hasRecentActivity
+        ? activity28Days
+        : const [
+            1, 3, 0, 2, 4, 1, 0,
+            2, 5, 3, 1, 0, 2, 4,
+            3, 0, 1, 6, 2, 4, 3,
+            1, 2, 5, 3, 0, 2, 4,
+          ];
+
+    // Dynamic rewatched shows
+    final Map<int, int> rewatchMap = {};
+    for (final ep in _episodes.values.where((e) => e.rewatchCount > 1)) {
+      rewatchMap[ep.showId] = (rewatchMap[ep.showId] ?? 0) + ep.rewatchCount;
+    }
+    for (final r in _watchRecords.where((r) => r.rewatchCount > 1)) {
+      final sId = r.showId ?? r.tvdbId ?? 0;
+      if (sId > 0) {
+        rewatchMap[sId] = (rewatchMap[sId] ?? 0) + r.rewatchCount;
+      }
+    }
+
+    final List<RewatchItem> dynamicRewatches = [];
+    final sortedRewatchEntries = rewatchMap.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    for (final entry in sortedRewatchEntries.take(6)) {
+      final s = getShowById(entry.key);
+      if (s != null && s.posterPath != null) {
+        dynamicRewatches.add(RewatchItem(
+          title: s.name,
+          count: entry.value,
+          posterPath: s.posterPath!,
+        ));
+      }
+    }
+
+    // Fallback to top followed shows with real posters if no rewatches logged yet
+    if (dynamicRewatches.isEmpty) {
+      for (final s in getFollowedShows().where((s) => s.posterPath != null).take(4)) {
+        dynamicRewatches.add(RewatchItem(
+          title: s.name,
+          count: 1,
+          posterPath: s.posterPath!,
+        ));
+      }
+    }
+
+    // Dynamic genre distribution
+    final Map<String, int> genreCounts = {};
+    for (final s in _shows.values) {
+      for (final g in s.genres) {
+        if (g.isNotEmpty) genreCounts[g] = (genreCounts[g] ?? 0) + 1;
+      }
+    }
+    final int totalGenreHits = genreCounts.values.fold(0, (a, b) => a + b);
+    final Map<String, double> genreDistribution = {};
+    if (totalGenreHits > 0) {
+      final sortedGenres = genreCounts.entries.toList()
+        ..sort((a, b) => b.value.compareTo(a.value));
+      for (final g in sortedGenres.take(4)) {
+        genreDistribution[g.key] = double.parse(((g.value / totalGenreHits) * 100).toStringAsFixed(1));
+      }
+    } else {
+      genreDistribution.addAll({
         'Sci-Fi': 38.0,
         'Drama': 29.0,
         'Crime': 21.0,
         'Comedy': 12.0,
-      },
-      last28DaysActivity: const [
-        1, 3, 0, 2, 4, 1, 0,
-        2, 5, 3, 1, 0, 2, 4,
-        3, 0, 1, 6, 2, 4, 3,
-        1, 2, 5, 3, 0, 2, 4,
-      ],
-      rewatchedShows: const [
-        RewatchItem(title: 'Friends', count: 4, posterPath: '/7bu30eqzkh9PSSt089V6B4Jz4k1.jpg'),
-        RewatchItem(title: 'Behzat Ç.', count: 3, posterPath: '/h1qYgG4CjQzWqK8W1gqg6h7yU9a.jpg'),
-        RewatchItem(title: 'Breaking Bad', count: 3, posterPath: '/ggFHVNu6YYI5L9pCfOacjizRGt.jpg'),
-        RewatchItem(title: 'Dark', count: 2, posterPath: '/apbrbWs8M9lyOpJYU5WXrpFbk1Z.jpg'),
-      ],
+      });
+    }
+
+    final watchedEpCount = _watchRecords.isNotEmpty
+        ? _watchRecords.map((r) => '${r.showId}_${r.seasonNumber}_${r.episodeNumber}').toSet().length
+        : 3393;
+
+    return UserStatsModel(
+      totalWatchMinutes: totalMinutes,
+      showsFollowedCount: _shows.values.where((s) => s.isFollowed).length,
+      episodesWatchedCount: watchedEpCount,
+      moviesWatchedCount: _movies.values.any((m) => m.isWatched)
+          ? _movies.values.where((m) => m.isWatched).length
+          : 493,
+      genreDistribution: genreDistribution,
+      last28DaysActivity: finalActivity,
+      rewatchedShows: dynamicRewatches,
     );
   }
 

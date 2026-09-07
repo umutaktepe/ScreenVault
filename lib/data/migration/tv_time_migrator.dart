@@ -77,6 +77,7 @@ class TvTimeMigrator {
 
       // 1. Parse followed_tv_show.csv
       ArchiveFile? followedShowsFile;
+      ArchiveFile? userTvShowDataFile;
       ArchiveFile? trackingV2File;
       ArchiveFile? trackingMoviesFile;
       ArchiveFile? friendsFile;
@@ -84,6 +85,8 @@ class TvTimeMigrator {
       for (final archFile in archive) {
         if (archFile.name == 'followed_tv_show.csv') {
           followedShowsFile = archFile;
+        } else if (archFile.name == 'user_tv_show_data.csv') {
+          userTvShowDataFile = archFile;
         } else if (archFile.name == 'tracking-prod-records-v2.csv') {
           trackingV2File = archFile;
         } else if (archFile.name == 'tracking-prod-records.csv') {
@@ -126,6 +129,39 @@ class TvTimeMigrator {
         }
       }
 
+      if (userTvShowDataFile != null) {
+        final content = utf8.decode(userTvShowDataFile.content as List<int>, allowMalformed: true);
+        final lines = const LineSplitter().convert(content);
+        for (int i = 1; i < lines.length; i++) {
+          final line = lines[i].trim();
+          if (line.isEmpty) continue;
+          final cols = _parseCsvLine(line);
+          if (cols.length >= 5) {
+            final tvShowId = int.tryParse(cols[3]);
+            final tvShowName = cols[1];
+            final active = cols[4] == '1';
+            final seenCount = int.tryParse(cols[0]) ?? 0;
+
+            if (tvShowId != null) {
+              final existing = _dbService.getShowById(tvShowId);
+              if (existing == null) {
+                totalShowsCount++;
+                final show = ShowModel(
+                  id: tvShowId,
+                  tvdbId: tvShowId,
+                  name: tvShowName,
+                  isFollowed: active,
+                  watchedEpisodesCount: seenCount,
+                );
+                await _dbService.upsertShow(show);
+              } else if (!existing.isFollowed && active) {
+                await _dbService.upsertShow(existing.copyWith(isFollowed: true));
+              }
+            }
+          }
+        }
+      }
+
       // 2. Parse tracking-prod-records-v2.csv (Episodes Watch Records)
       int totalWatchMinutes = 0;
       int episodesWatched = 0;
@@ -155,16 +191,40 @@ class TvTimeMigrator {
 
             final allShows = _dbService.getAllShows();
             ShowModel? matchingShow;
-            for (final s in allShows) {
-              if (s.id == sId || s.tvdbId == sId || (s.name.isNotEmpty && title.toLowerCase().contains(s.name.toLowerCase()))) {
-                matchingShow = s;
-                break;
+            if (sId != null && sId > 0) {
+              for (final s in allShows) {
+                if (s.tvdbId == sId || s.id == sId) {
+                  matchingShow = s;
+                  break;
+                }
               }
+            }
+
+            // Fallback: Exact title match ONLY (never substring containment!)
+            if (matchingShow == null && title.isNotEmpty) {
+              final lowerTitle = title.toLowerCase().trim();
+              for (final s in allShows) {
+                if (s.name.toLowerCase().trim() == lowerTitle) {
+                  matchingShow = s;
+                  break;
+                }
+              }
+            }
+
+            final targetShowId = matchingShow?.id ?? sId ?? i;
+            if (matchingShow == null && sId != null && sId > 0) {
+              final newShow = ShowModel(
+                id: sId,
+                tvdbId: sId,
+                name: title,
+                isFollowed: true,
+              );
+              await _dbService.upsertShow(newShow);
             }
 
             final record = WatchRecordModel(
               id: i,
-              showId: matchingShow?.id ?? sId,
+              showId: targetShowId,
               sId: sId,
               tvdbId: sId,
               seasonNumber: sNo,

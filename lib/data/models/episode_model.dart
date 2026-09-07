@@ -136,6 +136,7 @@ class EpisodeModel {
   factory EpisodeModel.fromTmdbJson(Map<String, dynamic> json, int showId, int seasonId) {
     final rawName = json['name'] as String?;
     final epNum = json['episode_number'] as int? ?? 0;
+    final sNum = json['season_number'] as int? ?? 0;
     String cleanName = rawName?.trim() ?? '';
     final lower = cleanName.toLowerCase();
     if (cleanName.isEmpty ||
@@ -147,11 +148,13 @@ class EpisodeModel {
       cleanName = '$epNum. Bölüm';
     }
 
+    final detId = showId > 0 ? (showId * 10000 + sNum * 100 + epNum) : (json['id'] as int? ?? 0);
+
     return EpisodeModel(
-      id: json['id'] as int? ?? 0,
+      id: detId,
       showId: showId,
-      seasonId: seasonId,
-      seasonNumber: json['season_number'] as int? ?? 0,
+      seasonId: seasonId > 0 ? seasonId : sNum,
+      seasonNumber: sNum,
       episodeNumber: epNum,
       tmdbId: json['id'] as int?,
       name: cleanName,

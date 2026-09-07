@@ -72,6 +72,10 @@ class TmdbClient {
           continue;
         }
 
+        if (e.response?.statusCode == 401) {
+          return {};
+        }
+
         if (attempt == retries - 1) {
           return await _fallbackGet(uri);
         }

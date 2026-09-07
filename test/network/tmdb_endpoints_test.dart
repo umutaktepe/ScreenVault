@@ -30,9 +30,16 @@ void main() {
       final searchUri = TmdbEndpoints.searchMulti('Behzat');
       expect(searchUri.path, '/3/search/multi');
       expect(searchUri.queryParameters['query'], 'Behzat');
+      expect(searchUri.queryParameters['language'], 'tr-TR');
+
+      final searchTvUri = TmdbEndpoints.searchTv('Çekiç ve Gül');
+      expect(searchTvUri.path, '/3/search/tv');
+      expect(searchTvUri.queryParameters['query'], 'Çekiç ve Gül');
+      expect(searchTvUri.queryParameters['language'], 'tr-TR');
 
       final trendingUri = TmdbEndpoints.trendingAllDay();
       expect(trendingUri.path, '/3/trending/all/day');
+      expect(trendingUri.queryParameters['language'], 'tr-TR');
     });
 
     test('Verifies TMDB image URL builder', () {

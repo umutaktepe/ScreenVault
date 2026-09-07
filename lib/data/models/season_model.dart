@@ -47,11 +47,13 @@ class SeasonModel {
   }
 
   factory SeasonModel.fromTmdbJson(Map<String, dynamic> json, int showId) {
+    final sNum = json['season_number'] as int? ?? 0;
+    final detId = showId > 0 ? (showId * 100 + sNum) : (json['id'] as int? ?? 0);
     return SeasonModel(
-      id: json['id'] as int? ?? 0,
+      id: detId,
       showId: showId,
-      seasonNumber: json['season_number'] as int? ?? 0,
-      name: json['name'] as String? ?? 'Season ${json['season_number']}',
+      seasonNumber: sNum,
+      name: json['name'] as String? ?? '$sNum. Sezon',
       overview: json['overview'] as String?,
       posterPath: json['poster_path'] as String?,
       episodeCount: json['episode_count'] as int? ?? 0,

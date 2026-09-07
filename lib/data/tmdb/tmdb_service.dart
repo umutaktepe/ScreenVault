@@ -45,7 +45,10 @@ class TmdbService {
     final seasonsJson = response['seasons'] as List?;
     if (seasonsJson != null) {
       return seasonsJson
-          .where((s) => s is Map<String, dynamic> && (s['season_number'] as int? ?? 0) > 0)
+          .where((s) =>
+              s is Map<String, dynamic> &&
+              (s['season_number'] as int? ?? 0) > 0 &&
+              (s['episode_count'] as int? ?? 0) > 0)
           .map((s) => SeasonModel.fromTmdbJson(s as Map<String, dynamic>, showInternalId))
           .toList();
     }
@@ -121,26 +124,87 @@ class TmdbService {
     return null;
   }
 
-  /// Live TMDB v3 search across movies and TV shows
+  /// Live TMDB v3 search across movies, TV shows and cast with Turkish localization
   Future<List<dynamic>> searchMulti(String query, {int page = 1}) async {
-    if (query.trim().isEmpty) return [];
-    final uri = TmdbEndpoints.searchMulti(query, page: page);
-    final response = await _client.get(uri);
+    final cleanQuery = query.trim();
+    if (cleanQuery.isEmpty) return [];
 
-    final results = response['results'] as List?;
-    if (results == null) return [];
+    try {
+      // Execute multi, TV and movie searches concurrently
+      final multiUri = TmdbEndpoints.searchMulti(cleanQuery, page: page);
+      final tvUri = TmdbEndpoints.searchTv(cleanQuery, page: page);
+      final movieUri = TmdbEndpoints.searchMovie(cleanQuery, page: page);
 
-    final List<dynamic> items = [];
-    for (final item in results) {
-      if (item is! Map<String, dynamic>) continue;
-      final mediaType = item['media_type'] as String?;
-      if (mediaType == 'tv') {
+      final responses = await Future.wait([
+        _client.get(multiUri),
+        _client.get(tvUri),
+        _client.get(movieUri),
+      ]);
+
+      final multiResults = (responses[0]['results'] as List?) ?? [];
+      final tvResults = (responses[1]['results'] as List?) ?? [];
+      final movieResults = (responses[2]['results'] as List?) ?? [];
+
+      final List<dynamic> items = [];
+      final Set<String> seen = {};
+
+      // 1. Prioritize TV show matches (e.g. Behzat Ç., Çekiç ve Gül)
+      for (final item in tvResults) {
+        if (item is! Map<String, dynamic>) continue;
+        final id = item['id'] as int?;
+        if (id == null || seen.contains('tv_$id')) continue;
+        seen.add('tv_$id');
         items.add(ShowModel.fromTmdbJson(item));
-      } else if (mediaType == 'movie') {
+      }
+
+      // 2. Prioritize direct Movie matches
+      for (final item in movieResults) {
+        if (item is! Map<String, dynamic>) continue;
+        final id = item['id'] as int?;
+        if (id == null || seen.contains('movie_$id')) continue;
+        seen.add('movie_$id');
         items.add(MovieModel.fromTmdbJson(item));
       }
+
+      // 3. Add items from multi search and extract known_for from actors
+      for (final item in multiResults) {
+        if (item is! Map<String, dynamic>) continue;
+        final mediaType = item['media_type'] as String?;
+        final id = item['id'] as int?;
+
+        if (mediaType == 'tv' && id != null) {
+          if (!seen.contains('tv_$id')) {
+            seen.add('tv_$id');
+            items.add(ShowModel.fromTmdbJson(item));
+          }
+        } else if (mediaType == 'movie' && id != null) {
+          if (!seen.contains('movie_$id')) {
+            seen.add('movie_$id');
+            items.add(MovieModel.fromTmdbJson(item));
+          }
+        } else if (mediaType == 'person') {
+          final knownFor = item['known_for'] as List?;
+          if (knownFor != null) {
+            for (final k in knownFor) {
+              if (k is! Map<String, dynamic>) continue;
+              final kType = k['media_type'] as String?;
+              final kId = k['id'] as int?;
+              if (kType == 'tv' && kId != null && !seen.contains('tv_$kId')) {
+                seen.add('tv_$kId');
+                items.add(ShowModel.fromTmdbJson(k));
+              } else if (kType == 'movie' && kId != null && !seen.contains('movie_$kId')) {
+                seen.add('movie_$kId');
+                items.add(MovieModel.fromTmdbJson(k));
+              }
+            }
+          }
+        }
+      }
+
+      return items;
+    } catch (_) {
+      return [];
     }
-    return items;
   }
 
   /// Top 5-10 Trending Hero items today

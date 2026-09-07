@@ -53,9 +53,15 @@ class _ShowDetailScreenState extends State<ShowDetailScreen> {
     _loadEpisodesForSelectedSeason();
 
     _dbService.fetchOrLoadSeasons(_currentShow).then((fresh) {
-      if (mounted && fresh.length != _seasons.length) {
+      if (mounted) {
+        final upShow = _dbService.getShowById(_currentShow.id) ?? _currentShow;
         setState(() {
+          _currentShow = upShow;
           _seasons = fresh;
+          if (!_seasons.any((s) => s.seasonNumber == _selectedSeasonNumber)) {
+            _selectedSeasonNumber = _seasons.isNotEmpty ? _seasons.first.seasonNumber : 1;
+            _loadEpisodesForSelectedSeason();
+          }
         });
       }
     });
