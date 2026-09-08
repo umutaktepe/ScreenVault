@@ -69,3 +69,7 @@ pbase/LICENSE.md
 .env.*
 *.env
 !.env.example
+
+# Local Agent Rules
+AGENTS.md
+agents.md
