@@ -36,6 +36,12 @@ void main() {
       expect(searchTvUri.path, '/3/search/tv');
       expect(searchTvUri.queryParameters['query'], 'Çekiç ve Gül');
       expect(searchTvUri.queryParameters['language'], 'tr-TR');
+      expect(searchTvUri.queryParameters.containsKey('first_air_date_year'), isFalse);
+
+      final searchTvWithYearUri = TmdbEndpoints.searchTv('Lost in Space', firstAirDateYear: 2018);
+      expect(searchTvWithYearUri.path, '/3/search/tv');
+      expect(searchTvWithYearUri.queryParameters['query'], 'Lost in Space');
+      expect(searchTvWithYearUri.queryParameters['first_air_date_year'], '2018');
 
       final trendingUri = TmdbEndpoints.trendingAllDay();
       expect(trendingUri.path, '/3/trending/all/day');

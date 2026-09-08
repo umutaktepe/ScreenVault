@@ -2,14 +2,20 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:archive/archive.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:screenvault/core/constants/app_constants.dart';
 import 'package:screenvault/data/migration/tv_time_migrator.dart';
 import 'package:screenvault/data/migration/tv_time_exporter.dart';
 import 'package:screenvault/data/database/database_service.dart';
 import 'package:screenvault/data/database/app_database.dart';
+import 'package:screenvault/data/models/show_model.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  setUp(() {
+    SharedPreferences.setMockInitialValues({});
+  });
 
   group('TV Time Migration and Export Engine Tests', () {
     test('Verifies gdpr-data.zip exists in Screen Vault workspace', () {
@@ -29,7 +35,7 @@ void main() {
           ? AppConstants.defaultGdprPath
           : AppConstants.exampleGdprPath;
 
-      final progressEvents = await migrator.importZipArchive(zipFilePath: path).toList();
+      final progressEvents = await migrator.importZipArchive(zipFilePath: path, enableTmdbEnrichment: false).toList();
 
       expect(progressEvents.isNotEmpty, isTrue);
       final lastEvent = progressEvents.last;
@@ -49,6 +55,22 @@ void main() {
           reason: 'Fury must be correctly parsed by its title, not its range key');
       expect(movies.any((m) => m.title.startsWith('watch-date-')), isFalse,
           reason: 'No movie title should be corrupted with watch-date range keys');
+
+      // Verify rewatch count preservation for movies
+      final interstellar = movies.firstWhere((m) => m.title == 'Interstellar');
+      expect(interstellar.rewatchCount, 5,
+          reason: 'Interstellar has 4 rewatches in TV Time so total viewings must be 5');
+
+      final olumluDunya = movies.firstWhere((m) => m.title == 'Ölümlü Dünya');
+      expect(olumluDunya.rewatchCount, 3,
+          reason: 'Ölümlü Dünya has 2 rewatches in TV Time so total viewings must be 3');
+
+      // Verify user stats rewatch library includes top rewatched items
+      final stats = dbService.getUserStats();
+      expect(stats.rewatchedShows.isNotEmpty, isTrue,
+          reason: 'Rewatched items must be present in user stats');
+      expect(stats.rewatchedShows.first.count, greaterThanOrEqualTo(3),
+          reason: 'Top rewatched item should have count >= 3');
 
       await db.close();
     });
@@ -97,7 +119,7 @@ void main() {
       final freshDbService = DatabaseService(db: freshDb);
       final freshMigrator = TvTimeMigrator(dbService: freshDbService);
 
-      final reimportEvents = await freshMigrator.importZipArchive(zipFilePath: tempZipPath).toList();
+      final reimportEvents = await freshMigrator.importZipArchive(zipFilePath: tempZipPath, enableTmdbEnrichment: false).toList();
       expect(reimportEvents.last.isCompleted, isTrue);
       expect(reimportEvents.last.isError, isFalse);
 
@@ -113,6 +135,42 @@ void main() {
       }
       await db.close();
       await freshDb.close();
+    });
+
+    test('Imports gdpr-data.zip on an already-seeded database without UNIQUE constraint collisions', () async {
+      final db = AppDatabase.memory();
+      final dbService = DatabaseService(db: db);
+      // With zero-seed architecture, insert a pre-existing show to test migration on an existing database
+      await dbService.init();
+      await dbService.upsertShow(const ShowModel(
+        id: 1,
+        tvdbId: 79168,
+        name: 'Friends',
+      ));
+
+      final friendsBefore = dbService.getShowByTvdbId(79168);
+      expect(friendsBefore, isNotNull);
+      expect(friendsBefore!.id, 1);
+
+      final migrator = TvTimeMigrator(dbService: dbService);
+      final path = File(AppConstants.defaultGdprPath).existsSync()
+          ? AppConstants.defaultGdprPath
+          : AppConstants.exampleGdprPath;
+
+      final progressEvents = await migrator.importZipArchive(zipFilePath: path, enableTmdbEnrichment: false).toList();
+      expect(progressEvents.isNotEmpty, isTrue);
+      final lastEvent = progressEvents.last;
+
+      expect(lastEvent.isError, isFalse,
+          reason: 'Migration on seeded DB must not crash: ${lastEvent.errorMessage}');
+      expect(lastEvent.isCompleted, isTrue);
+
+      // Verify Friends was updated in-place without duplicate
+      final friendsAfter = dbService.getShowByTvdbId(79168);
+      expect(friendsAfter, isNotNull);
+      expect(friendsAfter!.id, 1);
+
+      await db.close();
     });
   });
 }

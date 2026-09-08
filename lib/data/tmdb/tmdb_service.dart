@@ -2,6 +2,7 @@ import '../models/show_model.dart';
 import '../models/season_model.dart';
 import '../models/episode_model.dart';
 import '../models/movie_model.dart';
+import 'title_sanitizer.dart';
 import 'tmdb_client.dart';
 import 'tmdb_endpoints.dart';
 
@@ -96,10 +97,138 @@ class TmdbService {
     return null;
   }
 
+  /// Searches for a TV show with a 4-stage fallback mechanism:
+  /// Stage 1: Raw title search
+  /// Stage 2: cleanTitle + firstAirDateYear (if year is available)
+  /// Stage 3: cleanTitle unfiltered search + ±1 year tolerance matching
+  /// Stage 4: searchMulti cross-media search
+  Future<ShowModel?> searchTvShowWithFallback(String rawTitle, {int? targetYear}) async {
+    final trimmed = rawTitle.trim();
+    if (trimmed.isEmpty) return null;
+
+    final parsed = TitleSanitizer.parseTitleAndYear(trimmed);
+    final cleanTitle = parsed.cleanTitle;
+    final effectiveYear = targetYear ?? parsed.extractedYear;
+
+    // Aşama 1: Raw title ile arama
+    try {
+      final candidate = await searchTvShowByName(trimmed);
+      if (candidate != null) {
+        if (effectiveYear == null) return candidate;
+        final candYear = candidate.firstAirDate?.year;
+        if (candYear != null && TitleSanitizer.isWithinYearTolerance(candYear, effectiveYear)) {
+          return candidate;
+        }
+      }
+    } catch (_) {}
+
+    // Aşama 2: cleanTitle ve firstAirDateYear
+    if (effectiveYear != null && effectiveYear > 1900) {
+      try {
+        final uri = TmdbEndpoints.searchTv(cleanTitle, firstAirDateYear: effectiveYear);
+        final response = await _client.get(uri);
+        final results = response['results'] as List?;
+        if (results != null && results.isNotEmpty) {
+          final first = results.first as Map<String, dynamic>;
+          final dateStr = first['first_air_date'] as String?;
+          final date = dateStr != null ? DateTime.tryParse(dateStr) : null;
+          final candYear = date?.year;
+          if (candYear == null || TitleSanitizer.isWithinYearTolerance(candYear, effectiveYear)) {
+            final tmdbId = first['id'] as int?;
+            if (tmdbId != null) {
+              final details = await getTvShowDetails(tmdbId);
+              if (details != null) return details;
+            }
+            return ShowModel.fromTmdbJson(first);
+          }
+        }
+      } catch (_) {}
+    }
+
+    // Aşama 3: cleanTitle filtresiz arama + ±1 yıl tolerans kuralı
+    try {
+      final uri = TmdbEndpoints.searchTv(cleanTitle);
+      final response = await _client.get(uri);
+      final results = response['results'] as List?;
+      if (results != null && results.isNotEmpty) {
+        if (effectiveYear != null) {
+          for (final item in results) {
+            if (item is! Map<String, dynamic>) continue;
+            final dateStr = item['first_air_date'] as String?;
+            final date = dateStr != null ? DateTime.tryParse(dateStr) : null;
+            final itemYear = date?.year;
+            if (itemYear != null && TitleSanitizer.isWithinYearTolerance(itemYear, effectiveYear)) {
+              final tmdbId = item['id'] as int?;
+              if (tmdbId != null) {
+                final details = await getTvShowDetails(tmdbId);
+                if (details != null) return details;
+              }
+              return ShowModel.fromTmdbJson(item);
+            }
+          }
+        } else {
+          final first = results.first as Map<String, dynamic>;
+          final tmdbId = first['id'] as int?;
+          if (tmdbId != null) {
+            final details = await getTvShowDetails(tmdbId);
+            if (details != null) return details;
+          }
+          return ShowModel.fromTmdbJson(first);
+        }
+      }
+    } catch (_) {}
+
+    // Aşama 4: searchMulti çapraz arama
+    try {
+      final multiResults = await searchMulti(cleanTitle);
+      final tvShows = multiResults.whereType<ShowModel>().toList();
+      if (tvShows.isNotEmpty) {
+        if (effectiveYear != null) {
+          for (final s in tvShows) {
+            final sYear = s.firstAirDate?.year;
+            if (sYear != null && TitleSanitizer.isWithinYearTolerance(sYear, effectiveYear)) {
+              return s;
+            }
+          }
+        } else {
+          return tvShows.first;
+        }
+      }
+    } catch (_) {}
+
+    return null;
+  }
+
+  TmdbClient get client => _client;
+
   /// Searches for a Movie by name on TMDB
   Future<MovieModel?> searchMovieByName(String query) async {
-    if (query.trim().isEmpty) return null;
-    final uri = TmdbEndpoints.searchMovie(query);
+    return await searchMovieWithYear(query, null);
+  }
+
+  /// Searches for a Movie by name and optional release year on TMDB
+  Future<MovieModel?> searchMovieWithYear(String title, int? year) async {
+    final cleanTitle = title.trim();
+    if (cleanTitle.isEmpty) return null;
+
+    // Try search with release year first if valid
+    if (year != null && year > 1900) {
+      final uriWithYear = TmdbEndpoints.searchMovie(cleanTitle, year: year);
+      final responseWithYear = await _client.get(uriWithYear);
+      final results = responseWithYear['results'] as List?;
+      if (results != null && results.isNotEmpty) {
+        final first = results.first as Map<String, dynamic>;
+        final tmdbId = first['id'] as int?;
+        if (tmdbId != null) {
+          final details = await getMovieDetails(tmdbId);
+          if (details != null) return details;
+        }
+        return MovieModel.fromTmdbJson(first);
+      }
+    }
+
+    // Fallback to query without year
+    final uri = TmdbEndpoints.searchMovie(cleanTitle);
     final response = await _client.get(uri);
     final results = response['results'] as List?;
     if (results != null && results.isNotEmpty) {
@@ -111,6 +240,103 @@ class TmdbService {
       }
       return MovieModel.fromTmdbJson(first);
     }
+    return null;
+  }
+
+  /// Searches for a movie with a 4-stage fallback mechanism:
+  /// Stage 1: Raw title search
+  /// Stage 2: cleanTitle + primary_release_year (if year is available)
+  /// Stage 3: cleanTitle unfiltered search + ±1 year tolerance matching
+  /// Stage 4: searchMulti cross-media search
+  Future<MovieModel?> searchMovieWithFallback(String rawTitle, {int? targetYear}) async {
+    final trimmed = rawTitle.trim();
+    if (trimmed.isEmpty) return null;
+
+    final parsed = TitleSanitizer.parseTitleAndYear(trimmed);
+    final cleanTitle = parsed.cleanTitle;
+    final effectiveYear = targetYear ?? parsed.extractedYear;
+
+    // Aşama 1: Raw title ile arama
+    try {
+      final candidate = await searchMovieByName(trimmed);
+      if (candidate != null) {
+        if (effectiveYear == null) return candidate;
+        final candYear = candidate.releaseDate?.year;
+        if (candYear != null && TitleSanitizer.isWithinYearTolerance(candYear, effectiveYear)) {
+          return candidate;
+        }
+      }
+    } catch (_) {}
+
+    // Aşama 2: cleanTitle ve primary_release_year
+    if (effectiveYear != null && effectiveYear > 1900) {
+      try {
+        final uri = TmdbEndpoints.searchMovie(cleanTitle, year: effectiveYear);
+        final response = await _client.get(uri);
+        final results = response['results'] as List?;
+        if (results != null && results.isNotEmpty) {
+          final first = results.first as Map<String, dynamic>;
+          final tmdbId = first['id'] as int?;
+          if (tmdbId != null) {
+            final details = await getMovieDetails(tmdbId);
+            if (details != null) return details;
+          }
+          return MovieModel.fromTmdbJson(first);
+        }
+      } catch (_) {}
+    }
+
+    // Aşama 3: cleanTitle filtresiz arama + ±1 yıl tolerans kuralı
+    try {
+      final uri = TmdbEndpoints.searchMovie(cleanTitle);
+      final response = await _client.get(uri);
+      final results = response['results'] as List?;
+      if (results != null && results.isNotEmpty) {
+        if (effectiveYear != null) {
+          for (final item in results) {
+            if (item is! Map<String, dynamic>) continue;
+            final dateStr = item['release_date'] as String?;
+            final date = dateStr != null ? DateTime.tryParse(dateStr) : null;
+            final itemYear = date?.year;
+            if (itemYear != null && TitleSanitizer.isWithinYearTolerance(itemYear, effectiveYear)) {
+              final tmdbId = item['id'] as int?;
+              if (tmdbId != null) {
+                final details = await getMovieDetails(tmdbId);
+                if (details != null) return details;
+              }
+              return MovieModel.fromTmdbJson(item);
+            }
+          }
+        } else {
+          final first = results.first as Map<String, dynamic>;
+          final tmdbId = first['id'] as int?;
+          if (tmdbId != null) {
+            final details = await getMovieDetails(tmdbId);
+            if (details != null) return details;
+          }
+          return MovieModel.fromTmdbJson(first);
+        }
+      }
+    } catch (_) {}
+
+    // Aşama 4: searchMulti çapraz arama
+    try {
+      final multiResults = await searchMulti(cleanTitle);
+      final movies = multiResults.whereType<MovieModel>().toList();
+      if (movies.isNotEmpty) {
+        if (effectiveYear != null) {
+          for (final m in movies) {
+            final mYear = m.releaseDate?.year;
+            if (mYear != null && TitleSanitizer.isWithinYearTolerance(mYear, effectiveYear)) {
+              return m;
+            }
+          }
+        } else {
+          return movies.first;
+        }
+      }
+    } catch (_) {}
+
     return null;
   }
 

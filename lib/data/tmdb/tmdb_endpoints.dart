@@ -46,20 +46,28 @@ class TmdbEndpoints {
     });
   }
 
-  static Uri searchTv(String query, {int page = 1}) {
-    return _buildUri('/search/tv', {
+  static Uri searchTv(String query, {int? firstAirDateYear, int page = 1}) {
+    final params = <String, String>{
       'query': query,
       'page': page.toString(),
       'include_adult': 'false',
-    });
+    };
+    if (firstAirDateYear != null && firstAirDateYear > 0) {
+      params['first_air_date_year'] = firstAirDateYear.toString();
+    }
+    return _buildUri('/search/tv', params);
   }
 
-  static Uri searchMovie(String query, {int page = 1}) {
-    return _buildUri('/search/movie', {
+  static Uri searchMovie(String query, {int? year, int page = 1}) {
+    final params = <String, String>{
       'query': query,
       'page': page.toString(),
       'include_adult': 'false',
-    });
+    };
+    if (year != null && year > 0) {
+      params['primary_release_year'] = year.toString();
+    }
+    return _buildUri('/search/movie', params);
   }
 
   static Uri trendingAllDay() {
