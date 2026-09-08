@@ -1,5 +1,7 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:drift/drift.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../models/show_model.dart';
 import '../models/season_model.dart';
 import '../models/episode_model.dart';
@@ -7,8 +9,10 @@ import '../models/movie_model.dart';
 import '../models/watch_record_model.dart';
 import '../models/user_stats_model.dart';
 import '../models/friend_model.dart';
+import '../models/unresolved_item_model.dart';
 import '../tmdb/tmdb_service.dart';
 import '../tmdb/behzat_metadata.dart';
+import '../tmdb/title_sanitizer.dart';
 import '../sync/pocketbase_sync_engine.dart';
 import 'app_database.dart';
 
@@ -34,9 +38,11 @@ class DatabaseService {
   final Map<int, MovieModel> _movies = {};
   final List<WatchRecordModel> _watchRecords = [];
   final List<FriendModel> _friends = [];
+  final List<UnresolvedItemModel> _unresolvedItems = [];
 
   final _showsController = StreamController<List<ShowModel>>.broadcast();
   final _statsController = StreamController<UserStatsModel>.broadcast();
+  Timer? _notifyDebounce;
   final TmdbService _tmdbService = TmdbService();
   bool _isEnriching = false;
 
@@ -203,16 +209,83 @@ class DatabaseService {
     }
   }
 
-  /// Initializes database and seeds initial sample data if SQLite is empty
+  /// Initializes database and loads existing data from SQLite.
+  /// Zero-seed architecture: If SQLite is empty, it remains completely empty.
   Future<void> init() async {
+    await _deduplicateDatabaseTables();
     final existingShows = await _db.select(_db.showsTable).get();
-    if (existingShows.isEmpty) {
-      await _seedInitialData();
-    } else {
-      await _loadFromDb(existingShows);
-    }
+    await _loadFromDb(existingShows);
+    await _purgeContaminatedSeedHistory();
     await _cleanCorruptedMockData();
+
     unawaited(enrichAllMissingMetadata());
+  }
+
+  /// Purges contaminated initial mock/seed watch history so the app starts in a clean zero-state.
+  Future<void> _purgeContaminatedSeedHistory() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (prefs.getBool('seed_history_purged_v5') == true) return;
+
+      // 1. Remove seed watch history for Friends, Behzat, Dark, Succession if they were seeded
+      await (_db.delete(_db.episodeWatchHistoryTable)
+            ..where((t) =>
+                t.showId.isIn(const [1, 2, 3, 4]) |
+                t.tvdbId.isIn(const [79168, 235881, 334360, 334824, 336279, 338186])))
+          .go();
+
+      // 2. Also clean movie watch history for seed movies (Fury: 1, Samurai: 2)
+      await (_db.delete(_db.movieWatchHistoryTable)
+            ..where((t) => t.movieId.isIn(const [1, 2]) | (t.tmdbId.isIn(const [228150, 616]))))
+          .go();
+
+      // 3. Reset episodes watched status in SQLite for seed shows
+      await (_db.update(_db.episodesTable)
+            ..where((t) => t.showId.isIn(const [1, 2, 3, 4])))
+          .write(const EpisodesTableCompanion(
+            isWatched: Value(false),
+            rewatchCount: Value(0),
+            lastWatchedAt: Value(null),
+          ));
+
+      // 4. Reset movies in SQLite
+      await (_db.update(_db.moviesTable)
+            ..where((t) => t.id.isIn(const [1, 2]) | (t.tmdbId.isIn(const [228150, 616]))))
+          .write(const MoviesTableCompanion(
+            isWatched: Value(false),
+            isFollowed: Value(false),
+            watchedAt: Value(null),
+          ));
+
+      // 5. Reset shows watchedCount and isFollowed for seed shows in SQLite
+      // 5. Delete lingering seed shows from SQLite if not followed
+      await (_db.delete(_db.showsTable)
+            ..where((t) => t.id.isIn(const [1, 2, 3, 4]) & t.isFollowed.equals(false)))
+          .go();
+      // Delete lingering seed movies from SQLite if not followed and not watched
+      await (_db.delete(_db.moviesTable)
+            ..where((t) => t.id.isIn(const [1, 2]) & t.isFollowed.equals(false) & t.isWatched.equals(false)))
+          .go();
+
+      // Synchronize in-memory structures
+      _watchRecords.removeWhere((r) =>
+          [1, 2, 3, 4].contains(r.showId) ||
+          [79168, 235881, 334360, 334824, 336279, 338186].contains(r.tvdbId) ||
+          [79168, 235881, 334360, 334824, 336279, 338186].contains(r.sId));
+
+      _shows.removeWhere((id, s) => [1, 2, 3, 4].contains(id) && !s.isFollowed);
+      _movies.removeWhere((id, m) => [1, 2].contains(id) && !m.isFollowed && !m.isWatched);
+      _friends.removeWhere((f) => f.friendId == '21583905');
+
+      for (final ep in _episodes.values.where((e) => [1, 2, 3, 4].contains(e.showId))) {
+        _episodes[ep.id] = ep.copyWith(isWatched: false, rewatchCount: 0, lastWatchedAt: null);
+      }
+
+      await prefs.setBool('seed_history_purged_v5', true);
+      _notify();
+    } catch (e) {
+      debugPrint('[DatabaseService] Error during _purgeContaminatedSeedHistory: $e');
+    }
   }
 
   /// Cleanses any corrupted mock data, resolves TVDB IDs to TMDB IDs via API,
@@ -317,34 +390,143 @@ class DatabaseService {
     }
   }
 
+  Future<void> _deduplicateDatabaseTables() async {
+    try {
+      // 1. Shows Table: deduplicate by tvdbId and name
+      final allShows = await _db.select(_db.showsTable).get();
+      final Set<int> seenTvdb = {};
+      final Set<String> seenNames = {};
+      for (final s in allShows) {
+        bool shouldDelete = false;
+        if (s.tvdbId != null && s.tvdbId! > 0) {
+          if (seenTvdb.contains(s.tvdbId!)) {
+            shouldDelete = true;
+          } else {
+            seenTvdb.add(s.tvdbId!);
+          }
+        }
+        final clean = s.name.trim().toLowerCase();
+        if (clean.isNotEmpty) {
+          if (seenNames.contains(clean)) {
+            shouldDelete = true;
+          } else {
+            seenNames.add(clean);
+          }
+        }
+        if (shouldDelete) {
+          await (_db.delete(_db.showsTable)..where((t) => t.id.equals(s.id))).go();
+        }
+      }
+
+      // 2. Episodes Table: deduplicate by (showId, seasonNumber, episodeNumber)
+      final allEps = await _db.select(_db.episodesTable).get();
+      final Set<String> seenEpKeys = {};
+      for (final ep in allEps) {
+        final key = '${ep.showId}_${ep.seasonNumber}_${ep.episodeNumber}';
+        if (seenEpKeys.contains(key)) {
+          await (_db.delete(_db.episodesTable)..where((t) => t.id.equals(ep.id))).go();
+        } else {
+          seenEpKeys.add(key);
+        }
+      }
+
+      // 3. Seasons Table: deduplicate by (showId, seasonNumber)
+      final allSeasons = await _db.select(_db.seasonsTable).get();
+      final Set<String> seenSeasonKeys = {};
+      for (final s in allSeasons) {
+        final key = '${s.showId}_${s.seasonNumber}';
+        if (seenSeasonKeys.contains(key)) {
+          await (_db.delete(_db.seasonsTable)..where((t) => t.id.equals(s.id))).go();
+        } else {
+          seenSeasonKeys.add(key);
+        }
+      }
+    } catch (_) {}
+  }
+
+  ShowModel _convertShowsRowToModel(ShowsTableData s) {
+    final isOriginalBehzat = (s.tvdbId == 235881 || (s.id == 2 && s.name == 'Behzat Ç.'));
+    int? effectiveTmdbId = isOriginalBehzat ? 39176 : s.tmdbId;
+    if (effectiveTmdbId == 39176 && !isOriginalBehzat) {
+      effectiveTmdbId = null;
+    }
+    return ShowModel(
+      id: s.id,
+      tmdbId: effectiveTmdbId,
+      tvdbId: s.tvdbId,
+      name: s.name,
+      originalName: s.originalName,
+      overview: s.overview,
+      posterPath: _isMockPath(s.posterPath) ? null : s.posterPath,
+      backdropPath: _isMockPath(s.backdropPath) ? null : s.backdropPath,
+      status: s.status,
+      totalSeasons: s.totalSeasons,
+      totalEpisodes: s.totalEpisodes,
+      genres: s.genres.isNotEmpty ? s.genres.split(',') : [],
+      isFollowed: s.isFollowed,
+      watchedEpisodesCount: s.watchedEpisodesCount,
+      voteAverage: s.voteAverage,
+      firstAirDate: s.firstAirDate,
+      createdAt: s.createdAt,
+      updatedAt: s.updatedAt,
+    );
+  }
+
+  EpisodeModel _convertEpisodesRowToModel(EpisodesTableData ep) {
+    String cleanName = ep.name.trim();
+    final lower = cleanName.toLowerCase();
+    if (cleanName.isEmpty ||
+        lower == 'başlık yok' ||
+        lower == 'baslik yok' ||
+        lower == 'no title' ||
+        lower == 'untitled' ||
+        lower == 'tba') {
+      cleanName = '${ep.episodeNumber}. Bölüm';
+    }
+    return EpisodeModel(
+      id: ep.id,
+      showId: ep.showId,
+      seasonId: ep.seasonId,
+      seasonNumber: ep.seasonNumber,
+      episodeNumber: ep.episodeNumber,
+      tvdbId: ep.tvdbId,
+      tmdbId: ep.tmdbId,
+      name: cleanName,
+      overview: ep.overview,
+      stillPath: _isMockPath(ep.stillPath) ? null : ep.stillPath,
+      runtimeMinutes: ep.runtimeMinutes,
+      airDate: ep.airDate,
+      voteAverage: ep.voteAverage,
+      isWatched: ep.isWatched,
+      rewatchCount: ep.rewatchCount,
+      lastWatchedAt: ep.lastWatchedAt,
+    );
+  }
+
+  MovieModel _convertMoviesRowToModel(MoviesTableData m) {
+    return MovieModel(
+      id: m.id,
+      tmdbId: m.tmdbId,
+      imdbId: m.imdbId,
+      title: m.title,
+      overview: m.overview,
+      posterPath: _isMockPath(m.posterPath) ? null : m.posterPath,
+      backdropPath: _isMockPath(m.backdropPath) ? null : m.backdropPath,
+      releaseDate: m.releaseDate,
+      runtimeMinutes: m.runtimeMinutes,
+      genres: m.genres.isNotEmpty ? m.genres.split(',') : [],
+      isWatched: m.isWatched,
+      isFollowed: m.isFollowed,
+      watchedAt: m.watchedAt,
+      rewatchCount: m.rewatchCount,
+      voteAverage: m.voteAverage,
+    );
+  }
+
   Future<void> _loadFromDb(List<ShowsTableData> existingShows) async {
     _shows.clear();
     for (final s in existingShows) {
-      final isOriginalBehzat = (s.tvdbId == 235881 || (s.id == 2 && s.name == 'Behzat Ç.'));
-      int? effectiveTmdbId = isOriginalBehzat ? 39176 : s.tmdbId;
-      if (effectiveTmdbId == 39176 && !isOriginalBehzat) {
-        effectiveTmdbId = null;
-      }
-      _shows[s.id] = ShowModel(
-        id: s.id,
-        tmdbId: effectiveTmdbId,
-        tvdbId: s.tvdbId,
-        name: s.name,
-        originalName: s.originalName,
-        overview: s.overview,
-        posterPath: _isMockPath(s.posterPath) ? null : s.posterPath,
-        backdropPath: _isMockPath(s.backdropPath) ? null : s.backdropPath,
-        status: s.status,
-        totalSeasons: s.totalSeasons,
-        totalEpisodes: s.totalEpisodes,
-        genres: s.genres.isNotEmpty ? s.genres.split(',') : [],
-        isFollowed: s.isFollowed,
-        watchedEpisodesCount: s.watchedEpisodesCount,
-        voteAverage: s.voteAverage,
-        firstAirDate: s.firstAirDate,
-        createdAt: s.createdAt,
-        updatedAt: s.updatedAt,
-      );
+      _shows[s.id] = _convertShowsRowToModel(s);
     }
 
     final dbSeasons = await _db.select(_db.seasonsTable).get();
@@ -365,68 +547,13 @@ class DatabaseService {
     final dbEpisodes = await _db.select(_db.episodesTable).get();
     _episodes.clear();
     for (final ep in dbEpisodes) {
-      String cleanName = ep.name.trim();
-      final lower = cleanName.toLowerCase();
-      if (cleanName.isEmpty ||
-          lower == 'başlık yok' ||
-          lower == 'baslik yok' ||
-          lower == 'no title' ||
-          lower == 'untitled' ||
-          lower == 'tba') {
-        cleanName = '${ep.episodeNumber}. Bölüm';
-      }
-      _episodes[ep.id] = EpisodeModel(
-        id: ep.id,
-        showId: ep.showId,
-        seasonId: ep.seasonId,
-        seasonNumber: ep.seasonNumber,
-        episodeNumber: ep.episodeNumber,
-        tvdbId: ep.tvdbId,
-        tmdbId: ep.tmdbId,
-        name: cleanName,
-        overview: ep.overview,
-        stillPath: _isMockPath(ep.stillPath) ? null : ep.stillPath,
-        runtimeMinutes: ep.runtimeMinutes,
-        airDate: ep.airDate,
-        voteAverage: ep.voteAverage,
-        isWatched: ep.isWatched,
-        rewatchCount: ep.rewatchCount,
-        lastWatchedAt: ep.lastWatchedAt,
-      );
+      _episodes[ep.id] = _convertEpisodesRowToModel(ep);
     }
 
     final dbMovies = await _db.select(_db.moviesTable).get();
     _movies.clear();
     for (final m in dbMovies) {
-      _movies[m.id] = MovieModel(
-        id: m.id,
-        tmdbId: m.tmdbId,
-        imdbId: m.imdbId,
-        title: m.title,
-        overview: m.overview,
-        posterPath: _isMockPath(m.posterPath) ? null : m.posterPath,
-        backdropPath: _isMockPath(m.backdropPath) ? null : m.backdropPath,
-        releaseDate: m.releaseDate,
-        runtimeMinutes: m.runtimeMinutes,
-        genres: m.genres.isNotEmpty ? m.genres.split(',') : [],
-        isWatched: m.isWatched,
-        isFollowed: m.isFollowed,
-        watchedAt: m.watchedAt,
-        rewatchCount: m.rewatchCount,
-        voteAverage: m.voteAverage,
-      );
-    }
-
-    if (_friends.isEmpty) {
-      _friends.add(
-        FriendModel(
-          friendId: '21583905',
-          name: 'Kerem Yılmaz',
-          avatarUrl: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=120&auto=format&fit=crop&q=80',
-          affinity: 0.88,
-          addedAt: DateTime(2024, 6, 13),
-        ),
-      );
+      _movies[m.id] = _convertMoviesRowToModel(m);
     }
 
     final dbHistory = await _db.select(_db.episodeWatchHistoryTable).get();
@@ -447,255 +574,74 @@ class DatabaseService {
       ));
     }
 
-    // Ensure all seed shows have full watch history records and synced episodes
-    await _ensureSeedShowsHistoryBackfilled();
-
     _notify();
     unawaited(enrichAllMissingMetadata());
   }
 
-  Future<void> _seedInitialData() async {
-    // Top followed shows from TV Time archive
-    final friends = ShowModel(
-      id: 1,
-      tmdbId: 1668,
-      tvdbId: 79168,
-      name: 'Friends',
-      overview: 'Rachel Green, Ross Geller, Monica Geller, Joey Tribbiani, Chandler Bing and Phoebe Buffay are six twenty-somethings living in New York City.',
-      posterPath: null,
-      backdropPath: null,
-      status: 'Ended',
-      totalSeasons: 10,
-      totalEpisodes: 236,
-      genres: ['Comedy', 'Romance'],
-      isFollowed: true,
-      watchedEpisodesCount: 236,
-      voteAverage: 8.5,
-      firstAirDate: DateTime(1994, 9, 22),
-    );
+  /// Clears all active user data (watch history, followed states) without deleting show/movie metadata.
+  Future<void> clearActiveUserData() async {
+    await _db.delete(_db.episodeWatchHistoryTable).go();
+    await _db.delete(_db.movieWatchHistoryTable).go();
+    await _db.delete(_db.importQueueTable).go();
+    _watchRecords.clear();
+    _friends.clear();
 
-    final behzat = ShowModel(
-      id: 2,
-      tmdbId: 39176,
-      tvdbId: 235881,
-      name: 'Behzat Ç.',
-      originalName: 'Behzat Ç. Bir Ankara Polisiyesi',
-      overview: 'Behzat Ç. is a rough, violent, and morally ambiguous police commissioner in Ankara.',
-      posterPath: null,
-      backdropPath: null,
-      status: 'Returning Series',
-      totalSeasons: 4,
-      totalEpisodes: 105,
-      genres: ['Crime', 'Drama', 'Mystery'],
-      isFollowed: true,
-      watchedEpisodesCount: 96,
-      voteAverage: 8.8,
-      firstAirDate: DateTime(2010, 9, 19),
-    );
-
-    final dark = ShowModel(
-      id: 3,
-      tmdbId: 70523,
-      tvdbId: 334824,
-      name: 'Dark',
-      overview: 'A missing child sets four families on a frantic hunt for answers as they unearth a mind-bending mystery that spans three generations.',
-      posterPath: '/apbrbWs8M9lyOpJYU5WXrpFbk1Z.jpg',
-      backdropPath: '/3lBDg3i6nn5R2NKICJ79f94aAvm.jpg',
-      status: 'Ended',
-      totalSeasons: 3,
-      totalEpisodes: 26,
-      genres: ['Sci-Fi', 'Mystery', 'Drama'],
-      isFollowed: true,
-      watchedEpisodesCount: 26,
-      voteAverage: 8.4,
-      firstAirDate: DateTime(2017, 12, 1),
-    );
-
-    final succession = ShowModel(
-      id: 4,
-      tmdbId: 76331,
-      tvdbId: 338186,
-      name: 'Succession',
-      overview: 'The Roy family is known for controlling the biggest media and entertainment company in the world.',
-      posterPath: null,
-      backdropPath: null,
-      status: 'Ended',
-      totalSeasons: 4,
-      totalEpisodes: 39,
-      genres: ['Drama'],
-      isFollowed: true,
-      watchedEpisodesCount: 36,
-      voteAverage: 8.9,
-      firstAirDate: DateTime(2018, 6, 3),
-    );
-
-    await upsertShow(friends);
-    await upsertShow(behzat);
-    await upsertShow(dark);
-    await upsertShow(succession);
-
-    // Seasons for Behzat Ç.
-    for (int s = 1; s <= behzat.totalSeasons; s++) {
-      await upsertSeason(SeasonModel(
-        id: behzat.id * 100 + s,
-        showId: behzat.id,
-        seasonNumber: s,
-        name: '$s. Sezon',
-      ));
-    }
-
-    // Up next episode for Behzat Ç. (S01E36 - Gece Uçuşu)
-    final upNextEp = EpisodeModel(
-      id: 201,
-      showId: behzat.id,
-      seasonId: 1,
-      seasonNumber: 1,
-      episodeNumber: 36,
-      tvdbId: 4115317,
-      tmdbId: 39176,
-      name: 'Gece Uçuşu',
-      overview: 'Cinayet masası ekibi, meslektaşının işten atılmasından ve bir yolcunun uçaktan çıkarılmasından sorumlu olan kabin amirinin öldürülmesini araştırır.',
-      stillPath: '/1kBczkdnbW2VXu4QM6erkrNawJ8.jpg',
-      runtimeMinutes: 102,
-      airDate: DateTime(2011, 6, 5),
-      voteAverage: 9.1,
-      isWatched: false,
-    );
-    _episodes[upNextEp.id] = upNextEp;
-    await _db.into(_db.episodesTable).insertOnConflictUpdate(
-          EpisodesTableCompanion.insert(
-            id: Value(upNextEp.id),
-            showId: upNextEp.showId,
-            seasonId: upNextEp.seasonId,
-            seasonNumber: upNextEp.seasonNumber,
-            episodeNumber: upNextEp.episodeNumber,
-            tvdbId: Value(upNextEp.tvdbId),
-            tmdbId: Value(upNextEp.tmdbId),
-            name: upNextEp.name,
-            overview: Value(upNextEp.overview),
-            stillPath: Value(upNextEp.stillPath),
-            runtimeMinutes: Value(upNextEp.runtimeMinutes),
-            airDate: Value(upNextEp.airDate),
-            voteAverage: Value(upNextEp.voteAverage),
-            isWatched: Value(upNextEp.isWatched),
-          ),
-        );
-
-    // Sample Movies
-    final fury = MovieModel(
-      id: 1,
-      tmdbId: 228150,
-      title: 'Fury',
-      overview: 'In April 1945, the Allies make their final push in the European Theatre.',
-      posterPath: null,
-      runtimeMinutes: 134,
-      genres: ['War', 'Action', 'Drama'],
-      isWatched: true,
-      isFollowed: true,
-      watchedAt: DateTime(2024, 6, 26),
-      voteAverage: 7.5,
-    );
-
-    final lastSamurai = MovieModel(
-      id: 2,
-      tmdbId: 616,
-      title: 'The Last Samurai',
-      overview: 'Nathan Algren is an American captain who is hired by the Emperor of Japan to train the country\'s first modern infantry army.',
-      posterPath: null,
-      runtimeMinutes: 154,
-      genres: ['Action', 'Adventure', 'Drama'],
-      isWatched: true,
-      isFollowed: true,
-      watchedAt: DateTime(2024, 6, 18),
-      voteAverage: 7.6,
-    );
-
-    await upsertMovie(fury);
-    await upsertMovie(lastSamurai);
-
-    // Friends from friend.csv
-    _friends.add(
-      FriendModel(
-        friendId: '21583905',
-        name: 'Kerem Yılmaz',
-        avatarUrl: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=120&auto=format&fit=crop&q=80',
-        affinity: 0.88,
-        addedAt: DateTime(2024, 6, 13),
+    // Reset all episodes watch status in SQLite and memory
+    await _db.update(_db.episodesTable).write(
+      const EpisodesTableCompanion(
+        isWatched: Value(false),
+        rewatchCount: Value(0),
+        lastWatchedAt: Value(null),
       ),
     );
-
-    // Seed watch history records and sync episodes for all initial shows
-    await _ensureSeedShowsHistoryBackfilled();
-
-    _notify();
-  }
-
-  Future<void> _ensureSeedShowsHistoryBackfilled() async {
-    // Clean up any accidentally assigned show-level tvdbId from episodesTable
-    await (_db.update(_db.episodesTable)
-          ..where((t) => t.tvdbId.isIn(const [235881, 334360, 336279, 79168])))
-        .write(const EpisodesTableCompanion(tvdbId: Value(null)));
-    for (final ep in _episodes.values) {
-      if (ep.tvdbId == 235881 || ep.tvdbId == 334360 || ep.tvdbId == 336279 || ep.tvdbId == 79168) {
-        _episodes[ep.id] = ep.copyWith(tvdbId: null);
+    for (final id in _episodes.keys.toList()) {
+      final ep = _episodes[id];
+      if (ep != null) {
+        _episodes[id] = ep.copyWith(
+          isWatched: false,
+          rewatchCount: 0,
+          lastWatchedAt: null,
+        );
       }
     }
 
-    // 1. Behzat Ç. (id: 2, tvdbId: 235881, tmdbId: 39176)
-    final behzatShow = _shows.values.where((s) => s.tvdbId == 235881 || (s.id == 2 && s.name == 'Behzat Ç.')).firstOrNull;
-    if (behzatShow != null && behzatShow.tmdbId != 39176) {
-      final updatedShow = behzatShow.copyWith(tmdbId: 39176);
-      _shows[updatedShow.id] = updatedShow;
-      await (_db.update(_db.showsTable)..where((t) => t.id.equals(updatedShow.id))).write(
-        const ShowsTableCompanion(tmdbId: Value(39176)),
-      );
+    // Reset all shows watch count and followed status in SQLite and memory
+    await _db.update(_db.showsTable).write(
+      const ShowsTableCompanion(
+        watchedEpisodesCount: Value(0),
+        isFollowed: Value(false),
+      ),
+    );
+    for (final id in _shows.keys.toList()) {
+      final s = _shows[id];
+      if (s != null) {
+        _shows[id] = s.copyWith(
+          watchedEpisodesCount: 0,
+          isFollowed: false,
+        );
+      }
     }
 
-    // S1E36 must be unwatched (Up Next). Remove any erroneous S1E36 watch records.
-    _watchRecords.removeWhere((r) =>
-        (r.showId == 2 || r.tvdbId == 235881 || r.sId == 235881) &&
-        r.seasonNumber == 1 &&
-        r.episodeNumber == 36);
-    await (_db.delete(_db.episodeWatchHistoryTable)
-          ..where((t) =>
-              (t.showId.equals(2) | t.tvdbId.equals(235881) | t.sId.equals(235881)) &
-              t.seasonNumber.equals(1) &
-              t.episodeNumber.equals(36)))
-        .go();
-
-    final behzatCount = _watchRecords.where((r) =>
-        (r.showId == 2 || r.tvdbId == 235881 || r.sId == 235881) &&
-        !(r.seasonNumber == 1 && r.episodeNumber == 36)).length;
-    if (behzatCount < 96) {
-      await _seedBehzatWatchHistory(2);
+    // Reset all movies in SQLite and memory
+    await _db.update(_db.moviesTable).write(
+      const MoviesTableCompanion(
+        isWatched: Value(false),
+        isFollowed: Value(false),
+        watchedAt: Value(null),
+      ),
+    );
+    for (final id in _movies.keys.toList()) {
+      final m = _movies[id];
+      if (m != null) {
+        _movies[id] = m.copyWith(
+          isWatched: false,
+          isFollowed: false,
+          watchedAt: null,
+        );
+      }
     }
 
-    // 2. Dark (id: 3, tvdbId: 334360, tmdbId: 70523, 26 eps)
-    final darkCount = _watchRecords.where((r) =>
-        r.showId == 3 || r.tvdbId == 334360 || r.sId == 334360).length;
-    if (darkCount < 26) {
-      await _seedDarkWatchHistory(3);
-    }
-
-    // 3. Succession (id: 4, tvdbId: 336279, tmdbId: 76331, 36 eps)
-    final succCount = _watchRecords.where((r) =>
-        r.showId == 4 || r.tvdbId == 336279 || r.sId == 336279).length;
-    if (succCount < 36) {
-      await _seedSuccessionWatchHistory(4);
-    }
-
-    // 4. Friends (id: 1, tvdbId: 79168, tmdbId: 1668, 207 eps)
-    final friendsCount = _watchRecords.where((r) =>
-        r.showId == 1 || r.tvdbId == 79168 || r.sId == 79168).length;
-    if (friendsCount < 207) {
-      await _seedFriendsWatchHistory(1);
-    }
-
-    // Sync all in-memory and database episodes with watch records
-    await syncEpisodesWithWatchHistory();
-
-    // Backfill authentic TMDB metadata (stills, runtimes, titles) for Behzat Ç.
-    await _backfillBehzatEpisodesMetadata();
+    _notify();
   }
 
   Future<void> syncEpisodesWithWatchHistory() async {
@@ -744,24 +690,7 @@ class DatabaseService {
           rewatchCount: r.rewatchCount > 0 ? r.rewatchCount : 1,
           lastWatchedAt: r.watchedAt,
         );
-        _episodes[epModel.id] = epModel;
-        await _db.into(_db.episodesTable).insertOnConflictUpdate(
-              EpisodesTableCompanion.insert(
-                id: Value(epModel.id),
-                showId: targetShowId,
-                seasonId: r.seasonNumber,
-                seasonNumber: r.seasonNumber,
-                episodeNumber: r.episodeNumber,
-                tvdbId: const Value(null),
-                name: epModel.name,
-                runtimeMinutes: Value(epModel.runtimeMinutes),
-                airDate: Value(epModel.airDate),
-                voteAverage: const Value(8.5),
-                isWatched: const Value(true),
-                rewatchCount: Value(epModel.rewatchCount),
-                lastWatchedAt: Value(epModel.lastWatchedAt),
-              ),
-            );
+        await upsertEpisode(epModel, notify: false);
       }
     }
 
@@ -775,7 +704,7 @@ class DatabaseService {
         episodeNumber: ep.episodeNumber,
         episodeId: ep.id,
       );
-      if (hasHistory && !ep.isWatched) {
+      if (hasHistory) {
         final latest = getLatestWatchRecord(
           showId: ep.showId,
           tvdbId: show?.tvdbId,
@@ -783,21 +712,46 @@ class DatabaseService {
           episodeNumber: ep.episodeNumber,
           episodeId: ep.id,
         );
-        final updated = ep.copyWith(
-          isWatched: true,
-          lastWatchedAt: latest?.watchedAt ?? ep.lastWatchedAt ?? DateTime.now(),
-          rewatchCount: (latest != null && latest.rewatchCount > 0)
-              ? latest.rewatchCount
-              : (ep.rewatchCount > 0 ? ep.rewatchCount : 1),
-        );
-        _episodes[ep.id] = updated;
-        await (_db.update(_db.episodesTable)..where((t) => t.id.equals(ep.id))).write(
-          EpisodesTableCompanion(
-            isWatched: const Value(true),
-            lastWatchedAt: Value(updated.lastWatchedAt),
-            rewatchCount: Value(updated.rewatchCount),
-          ),
-        );
+
+        int maxRewatchInRecords = 0;
+        final targetShowId = show?.id ?? ep.showId;
+        final effectiveTvdbId = show?.tvdbId ?? ep.tvdbId;
+        final tmdbId = show?.tmdbId ?? ep.tmdbId;
+
+        for (final r in _watchRecords) {
+          final isMatch = (r.episodeId != null && r.episodeId == ep.id) ||
+              (r.seasonNumber == ep.seasonNumber &&
+                  r.episodeNumber == ep.episodeNumber &&
+                  (r.showId == targetShowId ||
+                      r.showId == ep.showId ||
+                      (effectiveTvdbId != null && (r.tvdbId == effectiveTvdbId || r.sId == effectiveTvdbId)) ||
+                      (tmdbId != null && (r.tvdbId == tmdbId || r.sId == tmdbId))));
+          if (isMatch && r.rewatchCount > maxRewatchInRecords) {
+            maxRewatchInRecords = r.rewatchCount;
+          }
+        }
+
+        final targetRewatch = maxRewatchInRecords > 0
+            ? maxRewatchInRecords
+            : ((latest != null && latest.rewatchCount > 0)
+                ? latest.rewatchCount
+                : (ep.rewatchCount > 0 ? ep.rewatchCount : 1));
+
+        if (!ep.isWatched || ep.rewatchCount != targetRewatch) {
+          final updated = ep.copyWith(
+            isWatched: true,
+            lastWatchedAt: latest?.watchedAt ?? ep.lastWatchedAt ?? DateTime.now(),
+            rewatchCount: targetRewatch,
+          );
+          _episodes[ep.id] = updated;
+          await (_db.update(_db.episodesTable)..where((t) => t.id.equals(ep.id))).write(
+            EpisodesTableCompanion(
+              isWatched: const Value(true),
+              lastWatchedAt: Value(updated.lastWatchedAt),
+              rewatchCount: Value(updated.rewatchCount),
+            ),
+          );
+        }
       } else if (!hasHistory && ep.isWatched) {
         if (ep.showId == 2 && ep.seasonNumber == 1 && ep.episodeNumber == 36) {
           final updated = ep.copyWith(
@@ -830,158 +784,6 @@ class DatabaseService {
           ),
         );
       }
-    }
-  }
-
-  Future<void> _seedBehzatWatchHistory(int showId) async {
-    const int tvdbId = 235881;
-    final List<Map<String, dynamic>> recordsToSeed = [];
-
-    // Season 1: 35 episodes watched (S01E36 unwatched for Up Next)
-    for (int ep = 1; ep <= 35; ep++) {
-      final epMeta = BehzatMetadata.seasons[1]?.where((m) => m['ep'] == ep).firstOrNull;
-      final epTitle = epMeta?['name'] as String? ?? '$ep. Bölüm';
-      final epDate = epMeta?['date'] != null ? DateTime.tryParse(epMeta!['date'] as String) : null;
-      final epRuntime = epMeta?['runtime'] as int? ?? 75;
-      recordsToSeed.add({
-        'season': 1,
-        'ep': ep,
-        'title': epTitle,
-        'runtime': epRuntime,
-        'date': epDate ?? DateTime(2010, 9, 19).add(Duration(days: ep * 7)),
-      });
-    }
-    // Season 2: 31 episodes watched (complete season)
-    for (int ep = 1; ep <= 31; ep++) {
-      final epMeta = BehzatMetadata.seasons[2]?.where((m) => m['ep'] == ep).firstOrNull;
-      final epTitle = epMeta?['name'] as String? ?? '$ep. Bölüm';
-      final epDate = epMeta?['date'] != null ? DateTime.tryParse(epMeta!['date'] as String) : null;
-      final epRuntime = epMeta?['runtime'] as int? ?? 75;
-      recordsToSeed.add({
-        'season': 2,
-        'ep': ep,
-        'title': epTitle,
-        'runtime': epRuntime,
-        'date': epDate ?? DateTime(2011, 11, 13).add(Duration(days: ep * 7)),
-      });
-    }
-    // Season 3: 27 episodes watched (complete season)
-    for (int ep = 1; ep <= 27; ep++) {
-      final epMeta = BehzatMetadata.seasons[3]?.where((m) => m['ep'] == ep).firstOrNull;
-      final epTitle = epMeta?['name'] as String? ?? '$ep. Bölüm';
-      final epDate = epMeta?['date'] != null ? DateTime.tryParse(epMeta!['date'] as String) : null;
-      final epRuntime = epMeta?['runtime'] as int? ?? 75;
-      recordsToSeed.add({
-        'season': 3,
-        'ep': ep,
-        'title': epTitle,
-        'runtime': epRuntime,
-        'date': epDate ?? DateTime(2012, 9, 21).add(Duration(days: ep * 7)),
-      });
-    }
-    // Season 4: 3 episodes watched
-    for (int ep = 1; ep <= 3; ep++) {
-      final epMeta = BehzatMetadata.seasons[4]?.where((m) => m['ep'] == ep).firstOrNull;
-      final epTitle = epMeta?['name'] as String? ?? '$ep. Bölüm';
-      final epDate = epMeta?['date'] != null ? DateTime.tryParse(epMeta!['date'] as String) : null;
-      final epRuntime = epMeta?['runtime'] as int? ?? 75;
-      recordsToSeed.add({
-        'season': 4,
-        'ep': ep,
-        'title': epTitle,
-        'runtime': epRuntime,
-        'date': epDate ?? DateTime(2019, 7, 25).add(Duration(days: ep * 7)),
-      });
-    }
-
-    for (final r in recordsToSeed) {
-      final seasonNum = r['season'] as int;
-      final epNum = r['ep'] as int;
-      final title = r['title'] as String;
-      final runtime = r['runtime'] as int;
-      final date = r['date'] as DateTime;
-
-      final epMeta = BehzatMetadata.seasons[seasonNum]?.where((m) => m['ep'] == epNum).firstOrNull;
-      final epStill = epMeta?['still'] as String?;
-      final epOverview = epMeta?['overview'] as String?;
-      final epVote = (epMeta?['vote'] as num?)?.toDouble() ?? 9.0;
-
-      final alreadyHas = _watchRecords.any((rec) =>
-          (rec.showId == showId || rec.tvdbId == tvdbId || rec.sId == tvdbId) &&
-          rec.seasonNumber == seasonNum &&
-          rec.episodeNumber == epNum);
-      if (!alreadyHas) {
-        final insertedId = await _db.into(_db.episodeWatchHistoryTable).insert(
-              EpisodeWatchHistoryTableCompanion.insert(
-                title: title,
-                watchedAt: date,
-                showId: Value(showId),
-                tvdbId: const Value(tvdbId),
-                sId: const Value(tvdbId),
-                seasonNumber: Value(seasonNum),
-                episodeNumber: Value(epNum),
-                runtimeMinutes: Value(runtime),
-                rewatchCount: const Value(1),
-              ),
-            );
-
-        final rec = WatchRecordModel(
-          id: insertedId,
-          showId: showId,
-          tvdbId: tvdbId,
-          sId: tvdbId,
-          seasonNumber: seasonNum,
-          episodeNumber: epNum,
-          title: title,
-          runtimeMinutes: runtime,
-          watchedAt: date,
-          rewatchCount: 1,
-        );
-        _watchRecords.add(rec);
-      }
-
-      // Also ensure episode exists in _episodes and episodesTable
-      final epId = showId * 10000 + seasonNum * 100 + epNum;
-      final existingEp = _episodes[epId];
-      final epModel = EpisodeModel(
-        id: existingEp?.id ?? epId,
-        showId: showId,
-        seasonId: seasonNum,
-        seasonNumber: seasonNum,
-        episodeNumber: epNum,
-        tvdbId: (existingEp?.tvdbId != tvdbId) ? existingEp?.tvdbId : null,
-        tmdbId: BehzatMetadata.tmdbId,
-        name: title,
-        overview: epOverview ?? existingEp?.overview,
-        stillPath: epStill ?? existingEp?.stillPath,
-        runtimeMinutes: runtime,
-        airDate: existingEp?.airDate ?? date,
-        voteAverage: epVote > 0 ? epVote : (existingEp?.voteAverage ?? 9.0),
-        isWatched: true,
-        rewatchCount: (existingEp != null && existingEp.rewatchCount > 0) ? existingEp.rewatchCount : 1,
-        lastWatchedAt: existingEp?.lastWatchedAt ?? date,
-      );
-      _episodes[epModel.id] = epModel;
-      await _db.into(_db.episodesTable).insertOnConflictUpdate(
-            EpisodesTableCompanion.insert(
-              id: Value(epModel.id),
-              showId: showId,
-              seasonId: seasonNum,
-              seasonNumber: seasonNum,
-              episodeNumber: epNum,
-              tvdbId: Value(epModel.tvdbId),
-              tmdbId: const Value(BehzatMetadata.tmdbId),
-              name: epModel.name,
-              overview: Value(epModel.overview),
-              stillPath: Value(epModel.stillPath),
-              runtimeMinutes: Value(runtime),
-              airDate: Value(epModel.airDate),
-              voteAverage: Value(epModel.voteAverage),
-              isWatched: const Value(true),
-              rewatchCount: const Value(1),
-              lastWatchedAt: Value(epModel.lastWatchedAt),
-            ),
-          );
     }
   }
 
@@ -1078,308 +880,25 @@ class DatabaseService {
     }
   }
 
-  Future<void> _seedDarkWatchHistory(int showId) async {
-    const int tvdbId = 334360;
-    final List<Map<String, dynamic>> recordsToSeed = [];
-
-    // S1: 10 eps (2017-12-01)
-    for (int ep = 1; ep <= 10; ep++) {
-      recordsToSeed.add({
-        'season': 1,
-        'ep': ep,
-        'title': '$ep. Bölüm',
-        'date': DateTime(2017, 12, 1).add(Duration(days: ep)),
-      });
-    }
-    // S2: 8 eps (2019-06-21)
-    for (int ep = 1; ep <= 8; ep++) {
-      recordsToSeed.add({
-        'season': 2,
-        'ep': ep,
-        'title': '$ep. Bölüm',
-        'date': DateTime(2019, 6, 21).add(Duration(days: ep)),
-      });
-    }
-    // S3: 8 eps (2020-06-27)
-    for (int ep = 1; ep <= 8; ep++) {
-      recordsToSeed.add({
-        'season': 3,
-        'ep': ep,
-        'title': '$ep. Bölüm',
-        'date': DateTime(2020, 6, 27).add(Duration(days: ep)),
-      });
+  void _notify({bool immediate = false}) {
+    if (!_showsController.isClosed) {
+      _showsController.add(getAllShows());
     }
 
-    for (final r in recordsToSeed) {
-      final seasonNum = r['season'] as int;
-      final epNum = r['ep'] as int;
-      final title = r['title'] as String;
-      final date = r['date'] as DateTime;
-
-      final alreadyHas = _watchRecords.any((rec) =>
-          (rec.showId == showId || rec.tvdbId == tvdbId || rec.sId == tvdbId) &&
-          rec.seasonNumber == seasonNum &&
-          rec.episodeNumber == epNum);
-      if (!alreadyHas) {
-        final insertedId = await _db.into(_db.episodeWatchHistoryTable).insert(
-              EpisodeWatchHistoryTableCompanion.insert(
-                title: title,
-                watchedAt: date,
-                showId: Value(showId),
-                tvdbId: const Value(tvdbId),
-                sId: const Value(tvdbId),
-                seasonNumber: Value(seasonNum),
-                episodeNumber: Value(epNum),
-                runtimeMinutes: const Value(60),
-                rewatchCount: const Value(1),
-              ),
-            );
-
-        _watchRecords.add(WatchRecordModel(
-          id: insertedId,
-          showId: showId,
-          tvdbId: tvdbId,
-          sId: tvdbId,
-          seasonNumber: seasonNum,
-          episodeNumber: epNum,
-          title: title,
-          runtimeMinutes: 60,
-          watchedAt: date,
-          rewatchCount: 1,
-        ));
+    if (immediate) {
+      _notifyDebounce?.cancel();
+      if (!_statsController.isClosed) {
+        _statsController.add(getUserStats());
       }
-
-      final epId = showId * 10000 + seasonNum * 100 + epNum;
-      final existingEp = _episodes[epId];
-      final epModel = EpisodeModel(
-        id: existingEp?.id ?? epId,
-        showId: showId,
-        seasonId: seasonNum,
-        seasonNumber: seasonNum,
-        episodeNumber: epNum,
-        tvdbId: (existingEp?.tvdbId != tvdbId) ? existingEp?.tvdbId : null,
-        tmdbId: existingEp?.tmdbId,
-        name: existingEp?.name.isNotEmpty == true ? existingEp!.name : title,
-        stillPath: existingEp?.stillPath,
-        runtimeMinutes: 60,
-        airDate: date,
-        voteAverage: 8.8,
-        isWatched: true,
-        rewatchCount: 1,
-        lastWatchedAt: date,
-      );
-      _episodes[epModel.id] = epModel;
-      await _db.into(_db.episodesTable).insertOnConflictUpdate(
-            EpisodesTableCompanion.insert(
-              id: Value(epModel.id),
-              showId: showId,
-              seasonId: seasonNum,
-              seasonNumber: seasonNum,
-              episodeNumber: epNum,
-              tvdbId: Value(epModel.tvdbId),
-              tmdbId: Value(epModel.tmdbId),
-              name: epModel.name,
-              runtimeMinutes: const Value(60),
-              airDate: Value(date),
-              voteAverage: const Value(8.8),
-              isWatched: const Value(true),
-              rewatchCount: const Value(1),
-              lastWatchedAt: Value(date),
-            ),
-          );
-    }
-  }
-
-  Future<void> _seedSuccessionWatchHistory(int showId) async {
-    const int tvdbId = 336279;
-    final List<Map<String, dynamic>> recordsToSeed = [];
-
-    // S1: 10 eps
-    for (int ep = 1; ep <= 10; ep++) {
-      recordsToSeed.add({
-        'season': 1,
-        'ep': ep,
-        'title': '$ep. Bölüm',
-        'date': DateTime(2018, 6, 3).add(Duration(days: ep * 7)),
-      });
-    }
-    // S2: 10 eps
-    for (int ep = 1; ep <= 10; ep++) {
-      recordsToSeed.add({
-        'season': 2,
-        'ep': ep,
-        'title': '$ep. Bölüm',
-        'date': DateTime(2019, 8, 11).add(Duration(days: ep * 7)),
-      });
-    }
-    // S3: 9 eps
-    for (int ep = 1; ep <= 9; ep++) {
-      recordsToSeed.add({
-        'season': 3,
-        'ep': ep,
-        'title': '$ep. Bölüm',
-        'date': DateTime(2021, 10, 17).add(Duration(days: ep * 7)),
-      });
-    }
-    // S4: 7 eps
-    for (int ep = 1; ep <= 7; ep++) {
-      recordsToSeed.add({
-        'season': 4,
-        'ep': ep,
-        'title': '$ep. Bölüm',
-        'date': DateTime(2023, 3, 26).add(Duration(days: ep * 7)),
-      });
+      return;
     }
 
-    for (final r in recordsToSeed) {
-      final seasonNum = r['season'] as int;
-      final epNum = r['ep'] as int;
-      final title = r['title'] as String;
-      final date = r['date'] as DateTime;
-
-      final alreadyHas = _watchRecords.any((rec) =>
-          (rec.showId == showId || rec.tvdbId == tvdbId || rec.sId == tvdbId) &&
-          rec.seasonNumber == seasonNum &&
-          rec.episodeNumber == epNum);
-      if (!alreadyHas) {
-        final insertedId = await _db.into(_db.episodeWatchHistoryTable).insert(
-              EpisodeWatchHistoryTableCompanion.insert(
-                title: title,
-                watchedAt: date,
-                showId: Value(showId),
-                tvdbId: const Value(tvdbId),
-                sId: const Value(tvdbId),
-                seasonNumber: Value(seasonNum),
-                episodeNumber: Value(epNum),
-                runtimeMinutes: const Value(60),
-                rewatchCount: const Value(1),
-              ),
-            );
-
-        _watchRecords.add(WatchRecordModel(
-          id: insertedId,
-          showId: showId,
-          tvdbId: tvdbId,
-          sId: tvdbId,
-          seasonNumber: seasonNum,
-          episodeNumber: epNum,
-          title: title,
-          runtimeMinutes: 60,
-          watchedAt: date,
-          rewatchCount: 1,
-        ));
+    _notifyDebounce?.cancel();
+    _notifyDebounce = Timer(const Duration(milliseconds: 150), () {
+      if (!_statsController.isClosed) {
+        _statsController.add(getUserStats());
       }
-
-      final epId = showId * 10000 + seasonNum * 100 + epNum;
-      final existingEp = _episodes[epId];
-      final epModel = EpisodeModel(
-        id: existingEp?.id ?? epId,
-        showId: showId,
-        seasonId: seasonNum,
-        seasonNumber: seasonNum,
-        episodeNumber: epNum,
-        tvdbId: (existingEp?.tvdbId != tvdbId) ? existingEp?.tvdbId : null,
-        tmdbId: existingEp?.tmdbId,
-        name: existingEp?.name.isNotEmpty == true ? existingEp!.name : title,
-        stillPath: existingEp?.stillPath,
-        runtimeMinutes: 60,
-        airDate: date,
-        voteAverage: 8.9,
-        isWatched: true,
-        rewatchCount: 1,
-        lastWatchedAt: date,
-      );
-      _episodes[epModel.id] = epModel;
-      await _db.into(_db.episodesTable).insertOnConflictUpdate(
-            EpisodesTableCompanion.insert(
-              id: Value(epModel.id),
-              showId: showId,
-              seasonId: seasonNum,
-              seasonNumber: seasonNum,
-              episodeNumber: epNum,
-              tvdbId: Value(epModel.tvdbId),
-              tmdbId: Value(epModel.tmdbId),
-              name: epModel.name,
-              runtimeMinutes: const Value(60),
-              airDate: Value(date),
-              voteAverage: const Value(8.9),
-              isWatched: const Value(true),
-              rewatchCount: const Value(1),
-              lastWatchedAt: Value(date),
-            ),
-          );
-    }
-  }
-
-  Future<void> _seedFriendsWatchHistory(int showId) async {
-    const int tvdbId = 79168;
-    final List<Map<String, dynamic>> recordsToSeed = [];
-
-    // Seasons 1-8: 24 episodes each = 192 episodes
-    for (int s = 1; s <= 8; s++) {
-      for (int ep = 1; ep <= 24; ep++) {
-        recordsToSeed.add({
-          'season': s,
-          'ep': ep,
-          'title': 'The One with $ep',
-          'date': DateTime(1994 + s - 1, 9, 22).add(Duration(days: ep * 7)),
-        });
-      }
-    }
-    // Season 9: 15 episodes (192 + 15 = 207)
-    for (int ep = 1; ep <= 15; ep++) {
-      recordsToSeed.add({
-        'season': 9,
-        'ep': ep,
-        'title': 'The One with $ep',
-        'date': DateTime(2002, 9, 26).add(Duration(days: ep * 7)),
-      });
-    }
-
-    for (final r in recordsToSeed) {
-      final seasonNum = r['season'] as int;
-      final epNum = r['ep'] as int;
-      final title = r['title'] as String;
-      final date = r['date'] as DateTime;
-
-      final alreadyHas = _watchRecords.any((rec) =>
-          (rec.showId == showId || rec.tvdbId == tvdbId || rec.sId == tvdbId) &&
-          rec.seasonNumber == seasonNum &&
-          rec.episodeNumber == epNum);
-      if (!alreadyHas) {
-        final insertedId = await _db.into(_db.episodeWatchHistoryTable).insert(
-              EpisodeWatchHistoryTableCompanion.insert(
-                title: title,
-                watchedAt: date,
-                showId: Value(showId),
-                tvdbId: const Value(tvdbId),
-                sId: const Value(tvdbId),
-                seasonNumber: Value(seasonNum),
-                episodeNumber: Value(epNum),
-                runtimeMinutes: const Value(22),
-                rewatchCount: const Value(1),
-              ),
-            );
-
-        _watchRecords.add(WatchRecordModel(
-          id: insertedId,
-          showId: showId,
-          tvdbId: tvdbId,
-          sId: tvdbId,
-          seasonNumber: seasonNum,
-          episodeNumber: epNum,
-          title: title,
-          runtimeMinutes: 22,
-          watchedAt: date,
-          rewatchCount: 1,
-        ));
-      }
-    }
-  }
-
-  void _notify() {
-    _showsController.add(getAllShows());
-    _statsController.add(getUserStats());
+    });
   }
 
   // --- Shows Operations ---
@@ -1397,37 +916,121 @@ class DatabaseService {
   }
 
   ShowModel? getShowByTvdbId(int tvdbId) {
+    if (tvdbId <= 0) return null;
     for (final s in _shows.values) {
       if (s.tvdbId == tvdbId) return s;
     }
     return null;
   }
 
-  Future<void> upsertShow(ShowModel show) async {
-    _shows[show.id] = show;
+  ShowModel? getShowByTmdbId(int tmdbId) {
+    if (tmdbId <= 0) return null;
+    for (final s in _shows.values) {
+      if (s.tmdbId == tmdbId) return s;
+    }
+    return null;
+  }
+
+  ShowModel? getShowByName(String name) {
+    final clean = name.trim().toLowerCase();
+    if (clean.isEmpty) return null;
+    for (final s in _shows.values) {
+      if (s.name.trim().toLowerCase() == clean ||
+          (s.originalName != null && s.originalName!.trim().toLowerCase() == clean)) {
+        return s;
+      }
+    }
+    return null;
+  }
+
+  Future<ShowModel> upsertShow(ShowModel show, {bool notify = true}) async {
+    // 1. Resolve existing show if any to avoid primary key / unique constraint collisions
+    ShowModel? existing = _shows[show.id];
+    if (existing == null) {
+      if (show.tvdbId != null && show.tvdbId! > 0) {
+        existing = getShowByTvdbId(show.tvdbId!);
+      }
+      if (existing == null && show.tmdbId != null && show.tmdbId! > 0) {
+        existing = getShowByTmdbId(show.tmdbId!);
+      }
+      if (existing == null && show.name.trim().isNotEmpty) {
+        existing = getShowByName(show.name);
+      }
+    }
+
+    // 2. Check SQLite table directly if not in memory
+    if (existing == null && show.tvdbId != null && show.tvdbId! > 0) {
+      final row = await (_db.select(_db.showsTable)..where((t) => t.tvdbId.equals(show.tvdbId!))).getSingleOrNull();
+      if (row != null) {
+        existing = _shows[row.id] ?? _convertShowsRowToModel(row);
+      }
+    }
+    if (existing == null && show.tmdbId != null && show.tmdbId! > 0) {
+      final row = await (_db.select(_db.showsTable)..where((t) => t.tmdbId.equals(show.tmdbId!))).getSingleOrNull();
+      if (row != null) {
+        existing = _shows[row.id] ?? _convertShowsRowToModel(row);
+      }
+    }
+
+    final targetId = existing?.id ?? show.id;
+
+    // 3. If replacing/merging an existing show with a different incoming ID,
+    // clean up any duplicate entry from memory and SQLite
+    if (existing != null && show.id != targetId) {
+      _shows.remove(show.id);
+      await (_db.delete(_db.showsTable)..where((t) => t.id.equals(show.id))).go();
+    }
+
+    // 4. Merge fields
+    final finalShow = show.copyWith(
+      id: targetId,
+      tmdbId: show.tmdbId ?? existing?.tmdbId,
+      tvdbId: show.tvdbId ?? existing?.tvdbId,
+      name: show.name.isNotEmpty ? show.name : (existing?.name ?? ''),
+      originalName: show.originalName ?? existing?.originalName,
+      overview: (show.overview != null && show.overview!.isNotEmpty) ? show.overview : existing?.overview,
+      posterPath: show.posterPath ?? existing?.posterPath,
+      backdropPath: show.backdropPath ?? existing?.backdropPath,
+      status: (show.status != null && show.status!.isNotEmpty) ? show.status : existing?.status,
+      totalSeasons: show.totalSeasons > 0 ? show.totalSeasons : (existing?.totalSeasons ?? 0),
+      totalEpisodes: show.totalEpisodes > 0 ? show.totalEpisodes : (existing?.totalEpisodes ?? 0),
+      genres: show.genres.isNotEmpty ? show.genres : (existing?.genres ?? []),
+      isFollowed: show.isFollowed || (existing?.isFollowed ?? false),
+      watchedEpisodesCount: show.watchedEpisodesCount > 0 ? show.watchedEpisodesCount : (existing?.watchedEpisodesCount ?? 0),
+      voteAverage: show.voteAverage > 0 ? show.voteAverage : (existing?.voteAverage ?? 0.0),
+      firstAirDate: show.firstAirDate ?? existing?.firstAirDate,
+      createdAt: existing?.createdAt ?? show.createdAt ?? DateTime.now(),
+      updatedAt: DateTime.now(),
+    );
+
+    _shows[targetId] = finalShow;
+
     await _db.into(_db.showsTable).insertOnConflictUpdate(
           ShowsTableCompanion.insert(
-            id: Value(show.id),
-            tmdbId: Value(show.tmdbId),
-            tvdbId: Value(show.tvdbId),
-            name: show.name,
-            originalName: Value(show.originalName),
-            overview: Value(show.overview),
-            posterPath: Value(show.posterPath),
-            backdropPath: Value(show.backdropPath),
-            status: Value(show.status),
-            totalSeasons: Value(show.totalSeasons),
-            totalEpisodes: Value(show.totalEpisodes),
-            genres: Value(show.genres.join(',')),
-            isFollowed: Value(show.isFollowed),
-            watchedEpisodesCount: Value(show.watchedEpisodesCount),
-            voteAverage: Value(show.voteAverage),
-            firstAirDate: Value(show.firstAirDate),
-            createdAt: Value(show.createdAt ?? DateTime.now()),
-            updatedAt: Value(show.updatedAt ?? DateTime.now()),
+            id: Value(finalShow.id),
+            tmdbId: Value(finalShow.tmdbId),
+            tvdbId: Value(finalShow.tvdbId),
+            name: finalShow.name,
+            originalName: Value(finalShow.originalName),
+            overview: Value(finalShow.overview),
+            posterPath: Value(finalShow.posterPath),
+            backdropPath: Value(finalShow.backdropPath),
+            status: Value(finalShow.status),
+            totalSeasons: Value(finalShow.totalSeasons),
+            totalEpisodes: Value(finalShow.totalEpisodes),
+            genres: Value(finalShow.genres.join(',')),
+            isFollowed: Value(finalShow.isFollowed),
+            watchedEpisodesCount: Value(finalShow.watchedEpisodesCount),
+            voteAverage: Value(finalShow.voteAverage),
+            firstAirDate: Value(finalShow.firstAirDate),
+            createdAt: Value(finalShow.createdAt ?? DateTime.now()),
+            updatedAt: Value(finalShow.updatedAt ?? DateTime.now()),
           ),
         );
-    _notify();
+    if (notify) {
+      _notify();
+    }
+    return finalShow;
   }
 
   // --- Season Operations ---
@@ -1886,24 +1489,54 @@ class DatabaseService {
   Future<void> toggleShowFollowed(int showId) async {
     final show = _shows[showId];
     if (show != null) {
-      await upsertShow(show.copyWith(isFollowed: !show.isFollowed));
+      final updated = show.copyWith(isFollowed: !show.isFollowed);
+      await upsertShow(updated);
+      unawaited(PocketBaseSyncEngine().pushTrackedShow(updated, isFollowed: updated.isFollowed));
     }
   }
 
-  Future<void> upsertSeason(SeasonModel season) async {
-    _seasons[season.id] = season;
+  Future<SeasonModel> upsertSeason(SeasonModel season) async {
+    SeasonModel? existing = _seasons[season.id];
+    if (existing == null) {
+      for (final s in _seasons.values) {
+        if (s.showId == season.showId && s.seasonNumber == season.seasonNumber) {
+          existing = s;
+          break;
+        }
+      }
+    }
+
+    final targetId = existing?.id ?? season.id;
+    if (existing != null && season.id != targetId) {
+      _seasons.remove(season.id);
+      await (_db.delete(_db.seasonsTable)..where((t) => t.id.equals(season.id))).go();
+    }
+
+    final finalSeason = season.copyWith(
+      id: targetId,
+      showId: existing?.showId ?? season.showId,
+      seasonNumber: existing?.seasonNumber ?? season.seasonNumber,
+      name: season.name.isNotEmpty ? season.name : (existing?.name ?? '${season.seasonNumber}. Sezon'),
+      overview: (season.overview != null && season.overview!.isNotEmpty) ? season.overview : existing?.overview,
+      posterPath: season.posterPath ?? existing?.posterPath,
+      episodeCount: season.episodeCount > 0 ? season.episodeCount : (existing?.episodeCount ?? 0),
+      airDate: season.airDate ?? existing?.airDate,
+    );
+
+    _seasons[targetId] = finalSeason;
     await _db.into(_db.seasonsTable).insertOnConflictUpdate(
           SeasonsTableCompanion.insert(
-            id: Value(season.id),
-            showId: season.showId,
-            seasonNumber: season.seasonNumber,
-            name: season.name,
-            overview: Value(season.overview),
-            posterPath: Value(season.posterPath),
-            episodeCount: Value(season.episodeCount),
-            airDate: Value(season.airDate),
+            id: Value(targetId),
+            showId: finalSeason.showId,
+            seasonNumber: finalSeason.seasonNumber,
+            name: finalSeason.name,
+            overview: Value(finalSeason.overview),
+            posterPath: Value(finalSeason.posterPath),
+            episodeCount: Value(finalSeason.episodeCount),
+            airDate: Value(finalSeason.airDate),
           ),
         );
+    return finalSeason;
   }
 
   // --- Episode & Up Next Operations ---
@@ -1915,29 +1548,83 @@ class DatabaseService {
     return _episodes.values.where((e) => e.showId == showId).toList();
   }
 
-  Future<void> upsertEpisode(EpisodeModel ep) async {
-    _episodes[ep.id] = ep;
+  Future<EpisodeModel> upsertEpisode(EpisodeModel ep, {bool notify = true}) async {
+    EpisodeModel? existing = _episodes[ep.id];
+    if (existing == null) {
+      for (final e in _episodes.values) {
+        if (e.showId == ep.showId && e.seasonNumber == ep.seasonNumber && e.episodeNumber == ep.episodeNumber) {
+          existing = e;
+          break;
+        }
+        if (ep.tvdbId != null && ep.tvdbId! > 0 && e.tvdbId == ep.tvdbId) {
+          existing = e;
+          break;
+        }
+      }
+    }
+
+    if (existing == null) {
+      final dbRow = await (_db.select(_db.episodesTable)
+            ..where((t) =>
+                (t.showId.equals(ep.showId) &
+                 t.seasonNumber.equals(ep.seasonNumber) &
+                 t.episodeNumber.equals(ep.episodeNumber))))
+          .getSingleOrNull();
+      if (dbRow != null) {
+        existing = _episodes[dbRow.id] ?? _convertEpisodesRowToModel(dbRow);
+      }
+    }
+
+    final targetId = existing?.id ?? ep.id;
+    if (existing != null && ep.id != targetId) {
+      _episodes.remove(ep.id);
+      await (_db.delete(_db.episodesTable)..where((t) => t.id.equals(ep.id))).go();
+    }
+
+    final finalEp = ep.copyWith(
+      id: targetId,
+      showId: existing?.showId ?? ep.showId,
+      seasonId: existing?.seasonId ?? ep.seasonId,
+      seasonNumber: existing?.seasonNumber ?? ep.seasonNumber,
+      episodeNumber: existing?.episodeNumber ?? ep.episodeNumber,
+      tvdbId: ep.tvdbId ?? existing?.tvdbId,
+      tmdbId: ep.tmdbId ?? existing?.tmdbId,
+      name: ep.name.isNotEmpty && !ep.name.startsWith('${ep.episodeNumber}.') ? ep.name : (existing?.name ?? ep.name),
+      overview: (ep.overview != null && ep.overview!.isNotEmpty) ? ep.overview : existing?.overview,
+      stillPath: ep.stillPath ?? existing?.stillPath,
+      runtimeMinutes: ep.runtimeMinutes > 0 ? ep.runtimeMinutes : (existing?.runtimeMinutes ?? 0),
+      airDate: ep.airDate ?? existing?.airDate,
+      voteAverage: ep.voteAverage > 0 ? ep.voteAverage : (existing?.voteAverage ?? 0.0),
+      isWatched: ep.isWatched || (existing?.isWatched ?? false),
+      rewatchCount: ep.rewatchCount > 0 ? ep.rewatchCount : (existing?.rewatchCount ?? 0),
+      lastWatchedAt: ep.lastWatchedAt ?? existing?.lastWatchedAt,
+    );
+
+    _episodes[targetId] = finalEp;
     await _db.into(_db.episodesTable).insertOnConflictUpdate(
           EpisodesTableCompanion.insert(
-            id: Value(ep.id),
-            showId: ep.showId,
-            seasonId: ep.seasonId,
-            seasonNumber: ep.seasonNumber,
-            episodeNumber: ep.episodeNumber,
-            tvdbId: Value(ep.tvdbId),
-            tmdbId: Value(ep.tmdbId),
-            name: ep.name,
-            overview: Value(ep.overview),
-            stillPath: Value(ep.stillPath),
-            runtimeMinutes: Value(ep.runtimeMinutes),
-            airDate: Value(ep.airDate),
-            voteAverage: Value(ep.voteAverage),
-            isWatched: Value(ep.isWatched),
-            rewatchCount: Value(ep.rewatchCount),
-            lastWatchedAt: Value(ep.lastWatchedAt),
+            id: Value(targetId),
+            showId: finalEp.showId,
+            seasonId: finalEp.seasonId,
+            seasonNumber: finalEp.seasonNumber,
+            episodeNumber: finalEp.episodeNumber,
+            tvdbId: Value(finalEp.tvdbId),
+            tmdbId: Value(finalEp.tmdbId),
+            name: finalEp.name,
+            overview: Value(finalEp.overview),
+            stillPath: Value(finalEp.stillPath),
+            runtimeMinutes: Value(finalEp.runtimeMinutes),
+            airDate: Value(finalEp.airDate),
+            voteAverage: Value(finalEp.voteAverage),
+            isWatched: Value(finalEp.isWatched),
+            rewatchCount: Value(finalEp.rewatchCount),
+            lastWatchedAt: Value(finalEp.lastWatchedAt),
           ),
         );
-    _notify();
+    if (notify) {
+      _notify();
+    }
+    return finalEp;
   }
 
   EpisodeModel? getUpNextEpisode() {
@@ -2133,28 +1820,142 @@ class DatabaseService {
   // --- Movies Operations ---
   List<MovieModel> getAllMovies() => _movies.values.toList();
 
-  Future<void> upsertMovie(MovieModel movie) async {
-    _movies[movie.id] = movie;
+  Future<MovieModel> upsertMovie(MovieModel movie, {bool notify = true}) async {
+    MovieModel? existing = _movies[movie.id];
+    if (existing == null && movie.tmdbId != null && movie.tmdbId! > 0) {
+      for (final m in _movies.values) {
+        if (m.tmdbId == movie.tmdbId) {
+          existing = m;
+          break;
+        }
+      }
+    }
+    if (existing == null && movie.title.trim().isNotEmpty) {
+      final clean = movie.title.trim().toLowerCase();
+      for (final m in _movies.values) {
+        if (m.title.trim().toLowerCase() == clean) {
+          existing = m;
+          break;
+        }
+      }
+    }
+
+    final targetId = existing?.id ?? movie.id;
+    if (existing != null && movie.id != targetId) {
+      _movies.remove(movie.id);
+      await (_db.delete(_db.moviesTable)..where((t) => t.id.equals(movie.id))).go();
+    }
+
+    final finalMovie = movie.copyWith(
+      id: targetId,
+      tmdbId: movie.tmdbId ?? existing?.tmdbId,
+      imdbId: movie.imdbId ?? existing?.imdbId,
+      title: movie.title.isNotEmpty ? movie.title : (existing?.title ?? ''),
+      overview: (movie.overview != null && movie.overview!.isNotEmpty) ? movie.overview : existing?.overview,
+      posterPath: movie.posterPath ?? existing?.posterPath,
+      backdropPath: movie.backdropPath ?? existing?.backdropPath,
+      releaseDate: movie.releaseDate ?? existing?.releaseDate,
+      runtimeMinutes: movie.runtimeMinutes > 0 ? movie.runtimeMinutes : (existing?.runtimeMinutes ?? 0),
+      genres: movie.genres.isNotEmpty ? movie.genres : (existing?.genres ?? []),
+      isWatched: movie.isWatched || (existing?.isWatched ?? false),
+      isFollowed: movie.isFollowed || (existing?.isFollowed ?? false),
+      watchedAt: movie.watchedAt ?? existing?.watchedAt,
+      rewatchCount: movie.rewatchCount > 0 ? movie.rewatchCount : (existing?.rewatchCount ?? 0),
+      voteAverage: movie.voteAverage > 0 ? movie.voteAverage : (existing?.voteAverage ?? 0.0),
+    );
+
+    _movies[targetId] = finalMovie;
     await _db.into(_db.moviesTable).insertOnConflictUpdate(
           MoviesTableCompanion.insert(
-            id: Value(movie.id),
-            tmdbId: Value(movie.tmdbId),
-            imdbId: Value(movie.imdbId),
-            title: movie.title,
-            overview: Value(movie.overview),
-            posterPath: Value(movie.posterPath),
-            backdropPath: Value(movie.backdropPath),
-            releaseDate: Value(movie.releaseDate),
-            runtimeMinutes: Value(movie.runtimeMinutes),
-            genres: Value(movie.genres.join(',')),
-            isWatched: Value(movie.isWatched),
-            isFollowed: Value(movie.isFollowed),
-            watchedAt: Value(movie.watchedAt),
-            rewatchCount: Value(movie.rewatchCount),
-            voteAverage: Value(movie.voteAverage),
+            id: Value(targetId),
+            tmdbId: Value(finalMovie.tmdbId),
+            imdbId: Value(finalMovie.imdbId),
+            title: finalMovie.title,
+            overview: Value(finalMovie.overview),
+            posterPath: Value(finalMovie.posterPath),
+            backdropPath: Value(finalMovie.backdropPath),
+            releaseDate: Value(finalMovie.releaseDate),
+            runtimeMinutes: Value(finalMovie.runtimeMinutes),
+            genres: Value(finalMovie.genres.join(',')),
+            isWatched: Value(finalMovie.isWatched),
+            isFollowed: Value(finalMovie.isFollowed),
+            watchedAt: Value(finalMovie.watchedAt),
+            rewatchCount: Value(finalMovie.rewatchCount),
+            voteAverage: Value(finalMovie.voteAverage),
           ),
         );
+    if (notify) {
+      _notify();
+    }
+    return finalMovie;
+  }
+
+  Future<void> upsertMoviesBatch(List<MovieModel> movies) async {
+    for (final movie in movies) {
+      await upsertMovie(movie, notify: false);
+    }
     _notify();
+  }
+
+  Future<void> toggleMovieFollowed(int movieId, {bool? isFollowed, bool syncRemote = true}) async {
+    final movie = _movies[movieId];
+    if (movie == null) return;
+    final newFollowed = isFollowed ?? !movie.isFollowed;
+    if (isFollowed != null && newFollowed == movie.isFollowed) return;
+    final updated = movie.copyWith(isFollowed: newFollowed);
+    _movies[movieId] = updated;
+
+    await (_db.update(_db.moviesTable)..where((t) => t.id.equals(movieId))).write(
+      MoviesTableCompanion(
+        isFollowed: Value(newFollowed),
+      ),
+    );
+    _notify();
+    if (syncRemote) {
+      unawaited(PocketBaseSyncEngine().pushTrackedMovie(updated, isFollowed: newFollowed));
+    }
+  }
+
+  Future<void> toggleMovieWatched(int movieId, {bool? isWatched, DateTime? watchedAt, bool syncRemote = true}) async {
+    final movie = _movies[movieId];
+    if (movie == null) return;
+    final newWatched = isWatched ?? !movie.isWatched;
+    if (isWatched != null && newWatched == movie.isWatched && (watchedAt == null || movie.watchedAt == watchedAt)) return;
+    final watchTime = newWatched ? (watchedAt ?? DateTime.now()) : null;
+
+    final updated = movie.copyWith(
+      isWatched: newWatched,
+      watchedAt: watchTime,
+    );
+    _movies[movieId] = updated;
+
+    await (_db.update(_db.moviesTable)..where((t) => t.id.equals(movieId))).write(
+      MoviesTableCompanion(
+        isWatched: Value(newWatched),
+        watchedAt: Value(watchTime),
+      ),
+    );
+
+    if (newWatched) {
+      await _db.into(_db.movieWatchHistoryTable).insertOnConflictUpdate(
+        MovieWatchHistoryTableCompanion.insert(
+          title: movie.title,
+          watchedAt: watchTime!,
+          movieId: Value(movie.id),
+          tmdbId: Value(movie.tmdbId),
+          runtimeMinutes: Value(movie.runtimeMinutes),
+          rewatchCount: const Value(1),
+        ),
+      );
+    } else {
+      await (_db.delete(_db.movieWatchHistoryTable)
+            ..where((t) => t.movieId.equals(movie.id) | (movie.tmdbId != null ? t.tmdbId.equals(movie.tmdbId!) : const Constant(false))))
+          .go();
+    }
+    _notify();
+    if (syncRemote) {
+      unawaited(PocketBaseSyncEngine().pushMovieWatchRecord(updated, isWatched: newWatched));
+    }
   }
 
   // --- Watch Records & Stats ---
@@ -2177,78 +1978,215 @@ class DatabaseService {
     _notify();
   }
 
+  Future<void> addWatchRecordsBatch(List<WatchRecordModel> records) async {
+    if (records.isEmpty) return;
+    _watchRecords.addAll(records);
+    await _db.batch((batch) {
+      batch.insertAll(
+        _db.episodeWatchHistoryTable,
+        records.map((record) => EpisodeWatchHistoryTableCompanion.insert(
+              title: record.title,
+              watchedAt: record.watchedAt,
+              episodeId: Value(record.episodeId),
+              showId: Value(record.showId),
+              tvdbId: Value(record.tvdbId),
+              sId: Value(record.sId),
+              seasonNumber: Value(record.seasonNumber),
+              episodeNumber: Value(record.episodeNumber),
+              runtimeMinutes: Value(record.runtimeMinutes),
+              rewatchCount: Value(record.rewatchCount),
+            )),
+      );
+    });
+    _notify();
+  }
+
+  void notifyAll({bool immediate = false}) {
+    _notify(immediate: immediate);
+  }
+
+  ShowModel? findShow({int? showId, int? tvdbId, int? tmdbId}) {
+    if (tvdbId != null && tvdbId > 0) {
+      for (final s in _shows.values) {
+        if (s.tvdbId == tvdbId) return s;
+      }
+    }
+    if (tmdbId != null && tmdbId > 0) {
+      for (final s in _shows.values) {
+        if (s.tmdbId == tmdbId) return s;
+      }
+    }
+    if (showId != null && _shows.containsKey(showId)) {
+      return _shows[showId];
+    }
+    if (showId != null && showId > 0) {
+      for (final s in _shows.values) {
+        if (s.tvdbId == showId || s.tmdbId == showId) return s;
+      }
+    }
+    return null;
+  }
+
+  MovieModel? findMovie({int? movieId, int? tmdbId, String? title}) {
+    if (tmdbId != null && tmdbId > 0) {
+      for (final m in _movies.values) {
+        if (m.tmdbId == tmdbId) return m;
+      }
+    }
+    if (movieId != null && _movies.containsKey(movieId)) {
+      return _movies[movieId];
+    }
+    if (movieId != null && movieId > 0) {
+      for (final m in _movies.values) {
+        if (m.tmdbId == movieId) return m;
+      }
+    }
+    if (title != null && title.trim().isNotEmpty) {
+      final clean = title.trim().toLowerCase();
+      for (final m in _movies.values) {
+        if (m.title.trim().toLowerCase() == clean) return m;
+      }
+    }
+    return null;
+  }
+
   UserStatsModel getUserStats() {
     int totalMinutes = 0;
-    if (_watchRecords.isNotEmpty) {
-      for (final r in _watchRecords) {
-        totalMinutes += r.runtimeMinutes;
+    for (final r in _watchRecords) {
+      totalMinutes += r.runtimeMinutes;
+    }
+    for (final m in _movies.values) {
+      if (m.isWatched) {
+        totalMinutes += m.runtimeMinutes;
       }
-    } else {
-      totalMinutes = 186576; // 4 Months 9 Days 13 Hours
     }
 
     // Dynamic 28 days activity from real watch records
     final now = DateTime.now();
     final List<int> activity28Days = List.filled(28, 0);
-    bool hasRecentActivity = false;
     for (final r in _watchRecords) {
       final diff = now.difference(r.watchedAt).inDays;
       if (diff >= 0 && diff < 28) {
         activity28Days[27 - diff]++;
-        hasRecentActivity = true;
       }
     }
-    final finalActivity = hasRecentActivity
-        ? activity28Days
-        : const [
-            1, 3, 0, 2, 4, 1, 0,
-            2, 5, 3, 1, 0, 2, 4,
-            3, 0, 1, 6, 2, 4, 3,
-            1, 2, 5, 3, 0, 2, 4,
-          ];
 
-    // Dynamic rewatched shows
-    final Map<int, int> rewatchMap = {};
-    for (final ep in _episodes.values.where((e) => e.rewatchCount > 1)) {
-      rewatchMap[ep.showId] = (rewatchMap[ep.showId] ?? 0) + ep.rewatchCount;
-    }
-    for (final r in _watchRecords.where((r) => r.rewatchCount > 1)) {
-      final sId = r.showId ?? r.tvdbId ?? 0;
-      if (sId > 0) {
-        rewatchMap[sId] = (rewatchMap[sId] ?? 0) + r.rewatchCount;
+    // Dynamic rewatched shows and movies (matching Stitch specification: 5x, 4x, 3x, 2x badges)
+    final List<_RewatchCandidate> candidates = [];
+
+    // 1. Movies with rewatches
+    for (final m in _movies.values) {
+      if (m.isWatched && m.rewatchCount > 1) {
+        candidates.add(_RewatchCandidate(
+          title: m.title,
+          count: m.rewatchCount,
+          posterPath: m.posterPath,
+          subScore: 0,
+        ));
       }
     }
+
+    // 2. Shows with rewatches - O(S + E + W) single-pass indexed aggregation
+    final Map<int, ShowModel> showById = {};
+    final Map<int, ShowModel> showByTvdbId = {};
+    for (final s in _shows.values) {
+      showById[s.id] = s;
+      if (s.tvdbId != null && s.tvdbId! > 0) {
+        showByTvdbId[s.tvdbId!] = s;
+      }
+    }
+
+    final Map<int, _ShowRewatchAccumulator> accumulators = {
+      for (final s in _shows.values) s.id: _ShowRewatchAccumulator(),
+    };
+
+    for (final ep in _episodes.values) {
+      if (ep.rewatchCount <= 1) continue;
+
+      final matched = <ShowModel>{};
+      final sFromId = showById[ep.showId];
+      if (sFromId != null) matched.add(sFromId);
+      if (ep.tvdbId != null && ep.tvdbId! > 0) {
+        final s = showByTvdbId[ep.tvdbId];
+        if (s != null) matched.add(s);
+      }
+
+      for (final s in matched) {
+        final acc = accumulators[s.id];
+        acc?.recordEpisode(ep.seasonNumber, ep.episodeNumber, ep.rewatchCount);
+      }
+    }
+
+    for (final r in _watchRecords) {
+      if (r.rewatchCount <= 1) continue;
+
+      final matched = <ShowModel>{};
+      if (r.showId != null) {
+        final s = showById[r.showId];
+        if (s != null) matched.add(s);
+      }
+      if (r.tvdbId != null && r.tvdbId! > 0) {
+        final s = showByTvdbId[r.tvdbId];
+        if (s != null) matched.add(s);
+      }
+      if (r.sId != null && r.sId! > 0) {
+        final s = showByTvdbId[r.sId];
+        if (s != null) matched.add(s);
+      }
+
+      for (final s in matched) {
+        final acc = accumulators[s.id];
+        acc?.recordEpisode(r.seasonNumber, r.episodeNumber, r.rewatchCount);
+      }
+    }
+
+    for (final s in _shows.values) {
+      final acc = accumulators[s.id];
+      if (acc != null && acc.maxEpRewatch > 1) {
+        candidates.add(_RewatchCandidate(
+          title: s.name,
+          count: acc.maxEpRewatch,
+          posterPath: s.posterPath,
+          subScore: acc.rewatchedEpsCount,
+        ));
+      }
+    }
+
+    // Sort descending: highest rewatch multiplier first (5x, 4x, 3x, 2x), tie-break by subScore
+    candidates.sort((a, b) {
+      final cmp = b.count.compareTo(a.count);
+      if (cmp != 0) return cmp;
+      return b.subScore.compareTo(a.subScore);
+    });
 
     final List<RewatchItem> dynamicRewatches = [];
-    final sortedRewatchEntries = rewatchMap.entries.toList()
-      ..sort((a, b) => b.value.compareTo(a.value));
-    for (final entry in sortedRewatchEntries.take(6)) {
-      final s = getShowById(entry.key);
-      if (s != null && s.posterPath != null) {
+    final Set<String> seenCandidateTitles = {};
+    for (final c in candidates) {
+      final cleanTitle = c.title.trim().toLowerCase();
+      if (cleanTitle.isNotEmpty && seenCandidateTitles.add(cleanTitle)) {
         dynamicRewatches.add(RewatchItem(
-          title: s.name,
-          count: entry.value,
-          posterPath: s.posterPath!,
+          title: c.title,
+          count: c.count,
+          posterPath: c.posterPath,
         ));
-      }
-    }
-
-    // Fallback to top followed shows with real posters if no rewatches logged yet
-    if (dynamicRewatches.isEmpty) {
-      for (final s in getFollowedShows().where((s) => s.posterPath != null).take(4)) {
-        dynamicRewatches.add(RewatchItem(
-          title: s.name,
-          count: 1,
-          posterPath: s.posterPath!,
-        ));
+        if (dynamicRewatches.length >= 8) break;
       }
     }
 
     // Dynamic genre distribution
     final Map<String, int> genreCounts = {};
     for (final s in _shows.values) {
-      for (final g in s.genres) {
-        if (g.isNotEmpty) genreCounts[g] = (genreCounts[g] ?? 0) + 1;
+      if (s.isFollowed || s.watchedEpisodesCount > 0) {
+        for (final g in s.genres) {
+          if (g.isNotEmpty) genreCounts[g] = (genreCounts[g] ?? 0) + 1;
+        }
+      }
+    }
+    for (final m in _movies.values) {
+      if (m.isWatched) {
+        for (final g in m.genres) {
+          if (g.isNotEmpty) genreCounts[g] = (genreCounts[g] ?? 0) + 1;
+        }
       }
     }
     final int totalGenreHits = genreCounts.values.fold(0, (a, b) => a + b);
@@ -2259,28 +2197,20 @@ class DatabaseService {
       for (final g in sortedGenres.take(4)) {
         genreDistribution[g.key] = double.parse(((g.value / totalGenreHits) * 100).toStringAsFixed(1));
       }
-    } else {
-      genreDistribution.addAll({
-        'Sci-Fi': 38.0,
-        'Drama': 29.0,
-        'Crime': 21.0,
-        'Comedy': 12.0,
-      });
     }
 
-    final watchedEpCount = _watchRecords.isNotEmpty
-        ? _watchRecords.map((r) => '${r.showId}_${r.seasonNumber}_${r.episodeNumber}').toSet().length
-        : 3393;
+    final watchedEpCount = _watchRecords
+        .map((r) => '${r.showId ?? r.tvdbId ?? r.sId}_${r.seasonNumber}_${r.episodeNumber}')
+        .toSet()
+        .length;
 
     return UserStatsModel(
       totalWatchMinutes: totalMinutes,
       showsFollowedCount: _shows.values.where((s) => s.isFollowed).length,
       episodesWatchedCount: watchedEpCount,
-      moviesWatchedCount: _movies.values.any((m) => m.isWatched)
-          ? _movies.values.where((m) => m.isWatched).length
-          : 493,
+      moviesWatchedCount: _movies.values.where((m) => m.isWatched).length,
       genreDistribution: genreDistribution,
-      last28DaysActivity: finalActivity,
+      last28DaysActivity: activity28Days,
       rewatchedShows: dynamicRewatches,
     );
   }
@@ -2288,20 +2218,24 @@ class DatabaseService {
   List<WatchRecordModel> getAllWatchRecords() => List.unmodifiable(_watchRecords);
 
   Future<void> insertWatchRecord(WatchRecordModel record) async {
+    final show = findShow(showId: record.showId, tvdbId: record.tvdbId);
+    final resolvedShowId = show?.id ?? record.showId;
+    final resolvedTvdbId = show?.tvdbId ?? record.tvdbId;
+
     _watchRecords.removeWhere((r) =>
-        (r.showId == record.showId || (record.tvdbId != null && r.tvdbId == record.tvdbId)) &&
+        (r.showId == resolvedShowId || (resolvedTvdbId != null && (r.tvdbId == resolvedTvdbId || r.sId == resolvedTvdbId))) &&
         r.seasonNumber == record.seasonNumber &&
         r.episodeNumber == record.episodeNumber);
-    _watchRecords.add(record);
+    _watchRecords.add(record.copyWith(showId: resolvedShowId, tvdbId: resolvedTvdbId));
 
     await _db.into(_db.episodeWatchHistoryTable).insertOnConflictUpdate(
           EpisodeWatchHistoryTableCompanion.insert(
             title: record.title,
             watchedAt: record.watchedAt,
             episodeId: Value(record.episodeId),
-            showId: Value(record.showId),
-            tvdbId: Value(record.tvdbId),
-            sId: Value(record.sId ?? record.tvdbId),
+            showId: Value(resolvedShowId),
+            tvdbId: Value(resolvedTvdbId),
+            sId: Value(record.sId ?? resolvedTvdbId),
             seasonNumber: Value(record.seasonNumber),
             episodeNumber: Value(record.episodeNumber),
             runtimeMinutes: Value(record.runtimeMinutes),
@@ -2310,7 +2244,7 @@ class DatabaseService {
         );
 
     final ep = _episodes.values.where((e) =>
-        (e.showId == record.showId || (record.tvdbId != null && e.tvdbId == record.tvdbId)) &&
+        (e.showId == resolvedShowId || (resolvedTvdbId != null && e.tvdbId == resolvedTvdbId)) &&
         e.seasonNumber == record.seasonNumber &&
         e.episodeNumber == record.episodeNumber).firstOrNull;
     if (ep != null) {
@@ -2327,24 +2261,41 @@ class DatabaseService {
         ),
       );
     }
+
+    if (show != null) {
+      final count = _watchRecords.where((r) =>
+          r.showId == show.id ||
+          (show.tvdbId != null && (r.tvdbId == show.tvdbId || r.sId == show.tvdbId))
+      ).map((r) => '${r.seasonNumber}_${r.episodeNumber}').toSet().length;
+
+      _shows[show.id] = show.copyWith(watchedEpisodesCount: count);
+      await (_db.update(_db.showsTable)..where((t) => t.id.equals(show.id))).write(
+        ShowsTableCompanion(watchedEpisodesCount: Value(count)),
+      );
+    }
+
     _notify();
   }
 
   Future<void> removeWatchRecord({required int showId, required int seasonNumber, required int episodeNumber}) async {
+    final show = findShow(showId: showId, tvdbId: showId);
+    final resolvedShowId = show?.id ?? showId;
+    final resolvedTvdbId = show?.tvdbId;
+
     _watchRecords.removeWhere((r) =>
-        (r.showId == showId || r.tvdbId == showId || r.sId == showId) &&
+        (r.showId == resolvedShowId || (resolvedTvdbId != null && (r.tvdbId == resolvedTvdbId || r.sId == resolvedTvdbId))) &&
         r.seasonNumber == seasonNumber &&
         r.episodeNumber == episodeNumber);
 
     await (_db.delete(_db.episodeWatchHistoryTable)
           ..where((t) =>
-              (t.showId.equals(showId) | t.tvdbId.equals(showId) | t.sId.equals(showId)) &
+              (t.showId.equals(resolvedShowId) | (resolvedTvdbId != null ? (t.tvdbId.equals(resolvedTvdbId) | t.sId.equals(resolvedTvdbId)) : const Constant(false))) &
               t.seasonNumber.equals(seasonNumber) &
               t.episodeNumber.equals(episodeNumber)))
         .go();
 
     final ep = _episodes.values.where((e) =>
-        (e.showId == showId || e.tvdbId == showId) &&
+        (e.showId == resolvedShowId || (resolvedTvdbId != null && e.tvdbId == resolvedTvdbId)) &&
         e.seasonNumber == seasonNumber &&
         e.episodeNumber == episodeNumber).firstOrNull;
     if (ep != null) {
@@ -2357,8 +2308,381 @@ class DatabaseService {
         ),
       );
     }
+
+    if (show != null) {
+      final count = _watchRecords.where((r) =>
+          r.showId == show.id ||
+          (show.tvdbId != null && (r.tvdbId == show.tvdbId || r.sId == show.tvdbId))
+      ).map((r) => '${r.seasonNumber}_${r.episodeNumber}').toSet().length;
+
+      _shows[show.id] = show.copyWith(watchedEpisodesCount: count);
+      await (_db.update(_db.showsTable)..where((t) => t.id.equals(show.id))).write(
+        ShowsTableCompanion(watchedEpisodesCount: Value(count)),
+      );
+    }
+
     _notify();
   }
 
+  /// Completely purges all local tables and restores a clean, brand-new account state.
+  Future<void> resetAllUserData() async {
+    await _db.delete(_db.episodeWatchHistoryTable).go();
+    await _db.delete(_db.movieWatchHistoryTable).go();
+    await _db.delete(_db.importQueueTable).go();
+    await _db.delete(_db.episodesTable).go();
+    await _db.delete(_db.seasonsTable).go();
+    await _db.delete(_db.showsTable).go();
+    await _db.delete(_db.moviesTable).go();
+
+    _shows.clear();
+    _seasons.clear();
+    _episodes.clear();
+    _movies.clear();
+    _watchRecords.clear();
+    _friends.clear();
+    _unresolvedItems.clear();
+
+    _notify();
+  }
+
+  // --- Unresolved Items & Reconciliation ---
+  List<UnresolvedItemModel> getUnresolvedItems() => List.unmodifiable(_unresolvedItems);
+
+  void setUnresolvedItems(List<UnresolvedItemModel> items) {
+    _unresolvedItems.clear();
+    _unresolvedItems.addAll(items);
+    _notify();
+  }
+
+  List<WatchRecordModel> getWatchRecordsForShow(int showId) {
+    final show = getShowById(showId);
+    final targetTvdb = show?.tvdbId;
+    final targetTmdb = show?.tmdbId;
+    return _watchRecords.where((r) {
+      return r.showId == showId ||
+          (targetTvdb != null && targetTvdb > 0 && (r.tvdbId == targetTvdb || r.sId == targetTvdb)) ||
+          (targetTmdb != null && targetTmdb > 0 && (r.tvdbId == targetTmdb || r.sId == targetTmdb));
+    }).toList();
+  }
+
+  /// Resolves an unmatched item by updating its metadata, poster, and re-linking watch history
+  Future<void> resolveUnmatchedItem(UnresolvedItemModel item, dynamic matchedTmdbItem) async {
+    String title = '';
+    int? tmdbId;
+    String? posterPath;
+    String? backdropPath;
+    String? overview;
+    int totalSeasons = 0;
+    int totalEpisodes = 0;
+    int runtimeMinutes = 0;
+    List<String> genres = [];
+    DateTime? releaseDate;
+    double voteAverage = 0.0;
+
+    if (matchedTmdbItem is ShowModel) {
+      title = matchedTmdbItem.name;
+      tmdbId = matchedTmdbItem.tmdbId ?? (matchedTmdbItem.id > 0 ? matchedTmdbItem.id : null);
+      posterPath = matchedTmdbItem.posterPath;
+      backdropPath = matchedTmdbItem.backdropPath;
+      overview = matchedTmdbItem.overview;
+      totalSeasons = matchedTmdbItem.totalSeasons;
+      totalEpisodes = matchedTmdbItem.totalEpisodes;
+      genres = matchedTmdbItem.genres;
+      releaseDate = matchedTmdbItem.firstAirDate;
+      voteAverage = matchedTmdbItem.voteAverage;
+    } else if (matchedTmdbItem is MovieModel) {
+      title = matchedTmdbItem.title;
+      tmdbId = matchedTmdbItem.tmdbId ?? (matchedTmdbItem.id > 0 ? matchedTmdbItem.id : null);
+      posterPath = matchedTmdbItem.posterPath;
+      backdropPath = matchedTmdbItem.backdropPath;
+      overview = matchedTmdbItem.overview;
+      runtimeMinutes = matchedTmdbItem.runtimeMinutes;
+      genres = matchedTmdbItem.genres;
+      releaseDate = matchedTmdbItem.releaseDate;
+      voteAverage = matchedTmdbItem.voteAverage;
+    } else if (matchedTmdbItem is Map<String, dynamic>) {
+      title = (matchedTmdbItem['name'] ?? matchedTmdbItem['title'] ?? '').toString();
+      tmdbId = matchedTmdbItem['id'] as int?;
+      posterPath = matchedTmdbItem['poster_path'] as String?;
+      backdropPath = matchedTmdbItem['backdrop_path'] as String?;
+      overview = matchedTmdbItem['overview'] as String?;
+      voteAverage = (matchedTmdbItem['vote_average'] as num?)?.toDouble() ?? 0.0;
+      final dateStr = (matchedTmdbItem['first_air_date'] ?? matchedTmdbItem['release_date']) as String?;
+      if (dateStr != null && dateStr.isNotEmpty) {
+        releaseDate = DateTime.tryParse(dateStr);
+      }
+    }
+
+    if (item.type == UnresolvedItemType.show) {
+      final cleanTitle = TitleSanitizer.parseTitleAndYear(item.rawTitle).cleanTitle;
+      final existing = getShowById(item.id) ??
+          getShowByTvdbId(item.tvdbId ?? -1) ??
+          (item.rawTitle.isNotEmpty ? getShowByName(item.rawTitle) : null) ??
+          (cleanTitle.isNotEmpty ? getShowByName(cleanTitle) : null) ??
+          ShowModel(
+            id: item.id,
+            tvdbId: item.tvdbId,
+            name: title.isNotEmpty ? title : (cleanTitle.isNotEmpty ? cleanTitle : item.rawTitle),
+            isFollowed: true,
+          );
+
+      final updated = existing.copyWith(
+        name: title.isNotEmpty ? title : existing.name,
+        tmdbId: tmdbId ?? existing.tmdbId,
+        posterPath: posterPath ?? existing.posterPath,
+        backdropPath: backdropPath ?? existing.backdropPath,
+        overview: (overview != null && overview.isNotEmpty) ? overview : existing.overview,
+        totalSeasons: totalSeasons > 0 ? totalSeasons : existing.totalSeasons,
+        totalEpisodes: totalEpisodes > 0 ? totalEpisodes : existing.totalEpisodes,
+        genres: genres.isNotEmpty ? genres : existing.genres,
+        voteAverage: voteAverage > 0 ? voteAverage : existing.voteAverage,
+        firstAirDate: releaseDate ?? existing.firstAirDate,
+        isFollowed: true,
+      );
+      await upsertShow(updated, notify: false);
+
+      // Update watch records title and link showId in-memory
+      for (int i = 0; i < _watchRecords.length; i++) {
+        final r = _watchRecords[i];
+        if (r.showId == existing.id ||
+            (existing.tvdbId != null && (r.tvdbId == existing.tvdbId || r.sId == existing.tvdbId))) {
+          _watchRecords[i] = r.copyWith(title: updated.name, showId: existing.id);
+        }
+      }
+
+      // Single database query update instead of N round-trips
+      await (_db.update(_db.episodeWatchHistoryTable)
+            ..where((t) =>
+                t.showId.equals(existing.id) |
+                (existing.tvdbId != null
+                    ? (t.tvdbId.equals(existing.tvdbId!) | t.sId.equals(existing.tvdbId!))
+                    : const Constant(false))))
+          .write(
+        EpisodeWatchHistoryTableCompanion(
+          showId: Value(existing.id),
+          title: Value(updated.name),
+        ),
+      );
+
+      await syncEpisodesWithWatchHistory();
+      if (PocketBaseSyncEngine().isAuthenticated) {
+        unawaited(PocketBaseSyncEngine().pushTrackedShow(updated));
+      }
+    } else if (item.type == UnresolvedItemType.movie) {
+      final cleanTitle = TitleSanitizer.parseTitleAndYear(item.rawTitle).cleanTitle;
+      final existing = _movies[item.id] ??
+          _movies.values.where((m) => m.title.trim().toLowerCase() == item.rawTitle.trim().toLowerCase()).firstOrNull ??
+          (cleanTitle.isNotEmpty
+              ? _movies.values.where((m) => m.title.trim().toLowerCase() == cleanTitle.trim().toLowerCase()).firstOrNull
+              : null) ??
+          MovieModel(
+            id: item.id,
+            title: title.isNotEmpty ? title : (cleanTitle.isNotEmpty ? cleanTitle : item.rawTitle),
+            isWatched: true,
+            isFollowed: true,
+          );
+
+      final updated = existing.copyWith(
+        title: title.isNotEmpty ? title : existing.title,
+        tmdbId: tmdbId ?? existing.tmdbId,
+        posterPath: posterPath ?? existing.posterPath,
+        backdropPath: backdropPath ?? existing.backdropPath,
+        overview: (overview != null && overview.isNotEmpty) ? overview : existing.overview,
+        runtimeMinutes: runtimeMinutes > 0 ? runtimeMinutes : existing.runtimeMinutes,
+        genres: genres.isNotEmpty ? genres : existing.genres,
+        releaseDate: releaseDate ?? existing.releaseDate,
+        voteAverage: voteAverage > 0 ? voteAverage : existing.voteAverage,
+      );
+      await upsertMovie(updated, notify: false);
+
+      await (_db.update(_db.movieWatchHistoryTable)
+            ..where((t) => t.movieId.equals(existing.id) | t.title.equals(existing.title)))
+          .write(
+        MovieWatchHistoryTableCompanion(
+          title: Value(updated.title),
+          tmdbId: Value(updated.tmdbId),
+          movieId: Value(existing.id),
+        ),
+      );
+      if (PocketBaseSyncEngine().isAuthenticated) {
+        unawaited(PocketBaseSyncEngine().pushTrackedMovie(updated));
+      }
+    }
+
+    _unresolvedItems.removeWhere((u) => u.id == item.id && u.type == item.type);
+    _notify();
+  }
+
+  /// Discards an unmatched item and completely purges its data and watch records
+  Future<void> discardUnmatchedItem(UnresolvedItemModel item) async {
+    if (item.type == UnresolvedItemType.show) {
+      final existing = getShowById(item.id) ??
+          getShowByTvdbId(item.tvdbId ?? -1) ??
+          (item.rawTitle.isNotEmpty ? getShowByName(item.rawTitle) : null);
+      final targetId = existing?.id ?? item.id;
+      final targetTvdb = item.tvdbId ?? existing?.tvdbId;
+
+      final showToPurge = existing ??
+          ShowModel(
+            id: targetId,
+            name: item.rawTitle,
+            tvdbId: targetTvdb,
+          );
+      if (PocketBaseSyncEngine().isAuthenticated) {
+        unawaited(PocketBaseSyncEngine().pushTrackedShow(showToPurge, isFollowed: false));
+      }
+
+      _shows.remove(targetId);
+      await (_db.delete(_db.showsTable)..where((t) => t.id.equals(targetId))).go();
+
+      final seasonIds = _seasons.values.where((s) => s.showId == targetId).map((s) => s.id).toList();
+      for (final sId in seasonIds) {
+        _seasons.remove(sId);
+      }
+      await (_db.delete(_db.seasonsTable)..where((t) => t.showId.equals(targetId))).go();
+
+      final epIds = _episodes.values.where((e) => e.showId == targetId).map((e) => e.id).toList();
+      for (final epId in epIds) {
+        _episodes.remove(epId);
+      }
+      await (_db.delete(_db.episodesTable)..where((t) => t.showId.equals(targetId))).go();
+
+      _watchRecords.removeWhere((r) =>
+          r.showId == targetId ||
+          (targetTvdb != null && (r.tvdbId == targetTvdb || r.sId == targetTvdb)));
+
+      await (_db.delete(_db.episodeWatchHistoryTable)
+            ..where((t) =>
+                t.showId.equals(targetId) |
+                (targetTvdb != null
+                    ? (t.tvdbId.equals(targetTvdb) | t.sId.equals(targetTvdb))
+                    : const Constant(false))))
+          .go();
+    } else if (item.type == UnresolvedItemType.movie) {
+      final existing = _movies[item.id] ??
+          _movies.values.where((m) => m.title.trim().toLowerCase() == item.rawTitle.trim().toLowerCase()).firstOrNull;
+      final targetId = existing?.id ?? item.id;
+
+      final movieToPurge = (existing ?? MovieModel(id: targetId, title: item.rawTitle)).copyWith(isWatched: false);
+      if (PocketBaseSyncEngine().isAuthenticated) {
+        unawaited(PocketBaseSyncEngine().pushTrackedMovie(movieToPurge, isFollowed: false));
+      }
+
+      _movies.remove(targetId);
+      await (_db.delete(_db.moviesTable)..where((t) => t.id.equals(targetId))).go();
+      await (_db.delete(_db.movieWatchHistoryTable)
+            ..where((t) => t.movieId.equals(targetId) | t.title.equals(movieToPurge.title)))
+          .go();
+    }
+
+    _unresolvedItems.removeWhere((u) => u.id == item.id && u.type == item.type);
+    _notify();
+  }
+
+  /// Lazy self-healing: Enriches a single movie missing poster/metadata
+  Future<MovieModel?> enrichSingleMovie(MovieModel movie) async {
+    try {
+      MovieModel? tmdbMovie;
+      if (movie.tmdbId != null && movie.tmdbId! > 0) {
+        tmdbMovie = await _tmdbService.getMovieDetails(movie.tmdbId!);
+      }
+      if (tmdbMovie == null && movie.title.isNotEmpty && !movie.title.startsWith('Movie ')) {
+        tmdbMovie = await _tmdbService.searchMovieWithFallback(
+          movie.title,
+          targetYear: movie.releaseDate?.year,
+        );
+      }
+      if (tmdbMovie != null) {
+        final cleanPoster = tmdbMovie.posterPath ?? (_isMockPath(movie.posterPath) ? null : movie.posterPath);
+        final cleanBackdrop = tmdbMovie.backdropPath ?? (_isMockPath(movie.backdropPath) ? null : movie.backdropPath);
+        final updated = movie.copyWith(
+          title: tmdbMovie.title.isNotEmpty ? tmdbMovie.title : movie.title,
+          tmdbId: tmdbMovie.tmdbId ?? movie.tmdbId,
+          posterPath: cleanPoster,
+          backdropPath: cleanBackdrop,
+          overview: (movie.overview == null || movie.overview!.isEmpty) ? tmdbMovie.overview : movie.overview,
+          runtimeMinutes: (movie.runtimeMinutes <= 0 && tmdbMovie.runtimeMinutes > 0)
+              ? tmdbMovie.runtimeMinutes
+              : movie.runtimeMinutes,
+          genres: movie.genres.isEmpty ? tmdbMovie.genres : movie.genres,
+          voteAverage: tmdbMovie.voteAverage > 0 ? tmdbMovie.voteAverage : movie.voteAverage,
+          releaseDate: movie.releaseDate ?? tmdbMovie.releaseDate,
+        );
+        return await upsertMovie(updated);
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  /// Lazy self-healing: Enriches a single show missing poster/metadata
+  Future<ShowModel?> enrichSingleShow(ShowModel show) async {
+    try {
+      ShowModel? tmdbShow;
+      if (show.tmdbId != null && show.tmdbId! > 0) {
+        tmdbShow = await _tmdbService.getTvShowDetails(show.tmdbId!);
+      }
+      if (tmdbShow == null && show.tvdbId != null && show.tvdbId! > 0) {
+        tmdbShow = await _tmdbService.findTvShowByTvdbId(show.tvdbId!);
+      }
+      if (tmdbShow == null && show.name.isNotEmpty && !show.name.startsWith('Show ')) {
+        tmdbShow = await _tmdbService.searchTvShowWithFallback(show.name);
+      }
+      if (tmdbShow != null) {
+        final cleanPoster = tmdbShow.posterPath ?? (_isMockPath(show.posterPath) ? null : show.posterPath);
+        final cleanBackdrop = tmdbShow.backdropPath ?? (_isMockPath(show.backdropPath) ? null : show.backdropPath);
+        final updated = show.copyWith(
+          name: tmdbShow.name.isNotEmpty ? tmdbShow.name : show.name,
+          tmdbId: tmdbShow.tmdbId ?? show.tmdbId,
+          posterPath: cleanPoster,
+          backdropPath: cleanBackdrop,
+          overview: (show.overview == null || show.overview!.isEmpty) ? tmdbShow.overview : show.overview,
+          totalSeasons: tmdbShow.totalSeasons > 0 ? tmdbShow.totalSeasons : show.totalSeasons,
+          totalEpisodes: tmdbShow.totalEpisodes > 0 ? tmdbShow.totalEpisodes : show.totalEpisodes,
+          genres: show.genres.isEmpty ? tmdbShow.genres : show.genres,
+          voteAverage: tmdbShow.voteAverage > 0 ? tmdbShow.voteAverage : show.voteAverage,
+          firstAirDate: show.firstAirDate ?? tmdbShow.firstAirDate,
+        );
+        return await upsertShow(updated);
+      }
+    } catch (_) {}
+    return null;
+  }
+
   List<FriendModel> getFriends() => _friends;
+}
+
+class _RewatchCandidate {
+  final String title;
+  final int count;
+  final String? posterPath;
+  final int subScore;
+
+  const _RewatchCandidate({
+    required this.title,
+    required this.count,
+    this.posterPath,
+    this.subScore = 0,
+  });
+}
+
+class _ShowRewatchAccumulator {
+  final Map<String, int> episodeRewatches = {};
+
+  void recordEpisode(int season, int episode, int count) {
+    final key = '${season}_$episode';
+    final existing = episodeRewatches[key] ?? 0;
+    if (count > existing) {
+      episodeRewatches[key] = count;
+    }
+  }
+
+  int get maxEpRewatch {
+    int maxVal = 0;
+    for (final c in episodeRewatches.values) {
+      if (c > maxVal) maxVal = c;
+    }
+    return maxVal;
+  }
+
+  int get rewatchedEpsCount => episodeRewatches.values.where((c) => c > 1).length;
 }

@@ -3,10 +3,12 @@ import '../../common/user_avatar.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_typography.dart';
 import '../../../data/database/database_service.dart';
+import '../../../data/services/pocketbase_auth_service.dart';
 import '../../../data/models/show_model.dart';
 import '../../../data/models/movie_model.dart';
 import '../episode_detail/episode_detail_screen.dart';
 import '../show_detail/show_detail_screen.dart';
+import '../../common/custom_poster_image.dart';
 import 'widgets/up_next_card.dart';
 import 'widgets/watchlist_item_tile.dart';
 
@@ -22,6 +24,8 @@ class WatchlistScreen extends StatefulWidget {
 
 class _WatchlistScreenState extends State<WatchlistScreen> {
   final DatabaseService _dbService = DatabaseService();
+  final Set<int> _enrichingMovieIds = {};
+  final Set<int> _enrichingShowIds = {};
   int _selectedSegment = 0; // 0: TV Shows, 1: Movies
   String _filterCategory = 'All'; // All, In Progress, Up to Date
 
@@ -58,10 +62,18 @@ class _WatchlistScreenState extends State<WatchlistScreen> {
                         ),
                         GestureDetector(
                           onTap: widget.onProfileTap,
-                          child: const UserAvatar(
-                            radius: 19,
-                            borderColor: AppColors.primaryAccent,
-                            fallbackText: 'Umut',
+                          child: StreamBuilder(
+                            stream: PocketBaseAuthService().authStateStream,
+                            builder: (context, _) {
+                              final auth = PocketBaseAuthService();
+                              final name = auth.isLoggedIn ? auth.userName : 'Misafir';
+                              return UserAvatar(
+                                radius: 19,
+                                borderColor: auth.isLoggedIn ? AppColors.functionalSuccess : AppColors.primaryAccent,
+                                url: auth.avatarUrl,
+                                fallbackText: name,
+                              );
+                            },
                           ),
                         ),
                       ],
@@ -178,6 +190,14 @@ class _WatchlistScreenState extends State<WatchlistScreen> {
                     delegate: SliverChildBuilderDelegate(
                       (context, index) {
                         final show = shows[index];
+                        if ((show.posterPath == null || show.posterPath!.isEmpty) && !_enrichingShowIds.contains(show.id)) {
+                          _enrichingShowIds.add(show.id);
+                          WidgetsBinding.instance.addPostFrameCallback((_) {
+                            _dbService.enrichSingleShow(show).then((_) {
+                              if (mounted) setState(() {});
+                            });
+                          });
+                        }
                         return WatchlistItemTile(
                           show: show,
                           onTap: () {
@@ -198,21 +218,39 @@ class _WatchlistScreenState extends State<WatchlistScreen> {
               ),
             ] else ...[
               // Movies View
-              SliverPadding(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                sliver: SliverList(
-                  delegate: SliverChildBuilderDelegate(
-                    (context, index) {
-                      final movies = _dbService.getAllMovies();
-                      if (movies.isEmpty) {
-                        return const Center(child: Text('No movies followed yet.'));
-                      }
-                      final movie = movies[index];
-                      return _buildMovieTile(movie);
-                    },
-                    childCount: _dbService.getAllMovies().length,
-                  ),
-                ),
+              StreamBuilder<List<ShowModel>>(
+                stream: _dbService.showsStream,
+                builder: (context, snapshot) {
+                  final movies = _dbService.getAllMovies().where((m) => m.isFollowed || m.isWatched).toList();
+                  if (movies.isEmpty) {
+                    return const SliverPadding(
+                      padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                      sliver: SliverToBoxAdapter(
+                        child: Padding(
+                          padding: EdgeInsets.symmetric(vertical: 48),
+                          child: Center(
+                            child: Text(
+                              'Takip edilen veya izlenen film bulunmuyor.',
+                              style: TextStyle(color: AppColors.secondarySlate, fontSize: 14),
+                            ),
+                          ),
+                        ),
+                      ),
+                    );
+                  }
+                  return SliverPadding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    sliver: SliverList(
+                      delegate: SliverChildBuilderDelegate(
+                        (context, index) {
+                          final movie = movies[index];
+                          return _buildMovieTile(movie);
+                        },
+                        childCount: movies.length,
+                      ),
+                    ),
+                  );
+                },
               ),
             ],
 
@@ -278,6 +316,15 @@ class _WatchlistScreenState extends State<WatchlistScreen> {
   }
 
   Widget _buildMovieTile(MovieModel movie) {
+    if ((movie.posterPath == null || movie.posterPath!.isEmpty) && !_enrichingMovieIds.contains(movie.id)) {
+      _enrichingMovieIds.add(movie.id);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _dbService.enrichSingleMovie(movie).then((_) {
+          if (mounted) setState(() {});
+        });
+      });
+    }
+
     return Container(
       margin: const EdgeInsets.symmetric(vertical: 6),
       padding: const EdgeInsets.all(12),
@@ -288,16 +335,23 @@ class _WatchlistScreenState extends State<WatchlistScreen> {
       ),
       child: Row(
         children: [
-          Container(
+          SizedBox(
             width: 60,
             height: 90,
-            decoration: BoxDecoration(
-              color: AppColors.surfaceHighlight,
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: const Center(
-              child: Icon(Icons.movie_rounded, color: AppColors.secondarySlate, size: 28),
-            ),
+            child: movie.posterPath != null && movie.posterPath!.isNotEmpty
+                ? CustomPosterImage(
+                    path: movie.posterPath,
+                    borderRadius: 10,
+                  )
+                : Container(
+                    decoration: BoxDecoration(
+                      color: AppColors.surfaceHighlight,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: const Center(
+                      child: Icon(Icons.movie_rounded, color: AppColors.secondarySlate, size: 28),
+                    ),
+                  ),
           ),
           const SizedBox(width: 14),
           Expanded(
@@ -316,19 +370,39 @@ class _WatchlistScreenState extends State<WatchlistScreen> {
                   style: AppTypography.bodySmall,
                 ),
                 const SizedBox(height: 8),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: AppColors.functionalSuccess.withValues(alpha: 0.15),
-                    borderRadius: BorderRadius.circular(6),
-                  ),
-                  child: Text(
-                    'İzlendi ✓',
-                    style: AppTypography.bodySmall.copyWith(
-                      color: AppColors.functionalSuccess,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
+                Row(
+                  children: [
+                    if (movie.isWatched)
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: AppColors.functionalSuccess.withValues(alpha: 0.15),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: Text(
+                          'İzlendi ✓',
+                          style: AppTypography.bodySmall.copyWith(
+                            color: AppColors.functionalSuccess,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      )
+                    else if (movie.isFollowed)
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: AppColors.primaryAccent.withValues(alpha: 0.15),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: Text(
+                          'İzlenecek',
+                          style: AppTypography.bodySmall.copyWith(
+                            color: AppColors.primaryAccent,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                  ],
                 ),
               ],
             ),
