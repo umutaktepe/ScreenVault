@@ -93,8 +93,9 @@ class _CalendarScreenState extends State<CalendarScreen> {
 
             // Upcoming Episodes List
             Expanded(
-              child: Builder(
-                builder: (context) {
+              child: StreamBuilder<List<ShowModel>>(
+                stream: DatabaseService().showsStream,
+                builder: (context, snapshot) {
                   final db = DatabaseService();
                   final followedShows = db.getFollowedShows();
                   final followedIds = followedShows.map((s) => s.id).toSet();

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../../../core/theme/app_colors.dart';
@@ -32,12 +33,30 @@ class _ShowDetailScreenState extends State<ShowDetailScreen> {
   int _selectedSeasonNumber = 1;
   List<EpisodeModel> _episodes = [];
   bool _isLoadingEpisodes = false;
+  StreamSubscription? _showSub;
 
   @override
   void initState() {
     super.initState();
     _currentShow = widget.show;
     _loadShowAndSeasons();
+
+    _showSub = _dbService.showsStream.listen((_) {
+      if (mounted) {
+        final up = _dbService.getShowById(_currentShow.id);
+        final epList = _dbService.getEpisodesForShowAndSeason(_currentShow.id, _selectedSeasonNumber);
+        setState(() {
+          if (up != null) _currentShow = up;
+          if (epList.isNotEmpty) _episodes = epList;
+        });
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _showSub?.cancel();
+    super.dispose();
   }
 
   void _loadShowAndSeasons() {

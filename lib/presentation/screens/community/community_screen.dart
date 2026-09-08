@@ -1,9 +1,11 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_typography.dart';
 import '../../../data/models/friend_model.dart';
 import '../../../data/database/database_service.dart';
 import '../../../data/sync/pocketbase_sync_engine.dart';
+import '../../../data/services/pocketbase_auth_service.dart';
 import '../../common/user_avatar.dart';
 import 'widgets/friend_activity_card.dart';
 import 'widgets/post_comment_sheet.dart';
@@ -66,11 +68,33 @@ class _CommunityScreenState extends State<CommunityScreen> {
     ),
   ];
 
+  StreamSubscription? _authSub;
+  StreamSubscription? _dbSub;
+
   @override
   void initState() {
     super.initState();
     _activities = List.from(_mockActivities);
     _loadActivities();
+
+    _authSub = PocketBaseAuthService().authStateStream.listen((_) {
+      if (mounted) {
+        _loadActivities();
+      }
+    });
+
+    _dbSub = _dbService.showsStream.listen((_) {
+      if (mounted) {
+        setState(() {});
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _authSub?.cancel();
+    _dbSub?.cancel();
+    super.dispose();
   }
 
   Future<void> _loadActivities() async {

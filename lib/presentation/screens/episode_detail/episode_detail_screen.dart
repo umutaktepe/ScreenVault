@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../../../core/theme/app_colors.dart';
@@ -44,6 +45,7 @@ class _EpisodeDetailScreenState extends State<EpisodeDetailScreen> {
   List<SeasonModel> _seasons = [];
   List<EpisodeModel> _episodes = [];
   bool _isLoadingEpisodes = false;
+  StreamSubscription? _dbSub;
 
   @override
   void initState() {
@@ -85,10 +87,46 @@ class _EpisodeDetailScreenState extends State<EpisodeDetailScreen> {
         });
       }
     });
+
+    _dbSub = _dbService.showsStream.listen((_) {
+      if (mounted) {
+        final watchedInHistory = _dbService.isEpisodeWatchedInHistory(
+          showId: widget.show.id,
+          tvdbId: widget.show.tvdbId,
+          seasonNumber: _currentEpisode.seasonNumber,
+          episodeNumber: _currentEpisode.episodeNumber,
+          episodeId: _currentEpisode.id,
+        );
+        final freshEp = _dbService.getEpisodeById(_currentEpisode.id);
+        final isW = (freshEp?.isWatched ?? false) || watchedInHistory;
+        final latest = watchedInHistory
+            ? _dbService.getLatestWatchRecord(
+                showId: widget.show.id,
+                tvdbId: widget.show.tvdbId,
+                seasonNumber: _currentEpisode.seasonNumber,
+                episodeNumber: _currentEpisode.episodeNumber,
+                episodeId: _currentEpisode.id,
+              )
+            : null;
+        final rewatch = (latest != null && latest.rewatchCount > 0)
+            ? latest.rewatchCount
+            : ((freshEp?.rewatchCount ?? 0) > 0 ? freshEp!.rewatchCount : (isW ? 1 : 0));
+        setState(() {
+          _isWatched = isW;
+          _rewatchCount = rewatch;
+          _currentEpisode = _currentEpisode.copyWith(
+            isWatched: isW,
+            rewatchCount: rewatch,
+            lastWatchedAt: latest?.watchedAt ?? freshEp?.lastWatchedAt ?? _currentEpisode.lastWatchedAt,
+          );
+        });
+      }
+    });
   }
 
   @override
   void dispose() {
+    _dbSub?.cancel();
     _railScrollController.dispose();
     super.dispose();
   }
@@ -642,7 +680,13 @@ class _EpisodeDetailScreenState extends State<EpisodeDetailScreen> {
                     const SizedBox(height: 24),
 
                     // Spoiler Comments
-                    const SpoilerCommentsList(),
+                    SpoilerCommentsList(
+                      showId: widget.show.id,
+                      seasonNumber: _currentSeasonNumber,
+                      episodeNumber: _currentEpisode.episodeNumber,
+                      episodeCode: 'S${_currentSeasonNumber.toString().padLeft(2, '0')}E${_currentEpisode.episodeNumber.toString().padLeft(2, '0')}',
+                      showTitle: widget.show.name,
+                    ),
 
                     const SizedBox(height: 48),
                   ],

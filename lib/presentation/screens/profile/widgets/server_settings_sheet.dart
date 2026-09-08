@@ -1,9 +1,11 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import '../../../../core/config/tmdb_config.dart';
 import '../../../../core/network/pocketbase_client.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/theme/app_typography.dart';
 import '../../../../data/database/database_service.dart';
+import '../../../../data/sync/pocketbase_sync_engine.dart';
 
 class ServerSettingsSheet extends StatefulWidget {
   const ServerSettingsSheet({super.key});
@@ -69,7 +71,7 @@ class _ServerSettingsSheetState extends State<ServerSettingsSheet> {
     });
 
     try {
-      final isHealthy = await _client.checkHealth();
+      final isHealthy = await _client.checkUrlHealth(testUrl);
       if (mounted) {
         setState(() {
           _isTestingPb = false;
@@ -127,6 +129,10 @@ class _ServerSettingsSheetState extends State<ServerSettingsSheet> {
     bool pbOk = true;
     if (newUrl.isNotEmpty) {
       pbOk = await _client.updateServerUrl(newUrl);
+      if (pbOk && _client.isAuthenticated) {
+        PocketBaseSyncEngine().startRealtimeListener(force: true);
+        unawaited(PocketBaseSyncEngine().syncAll());
+      }
     }
 
     if (newTmdbKey.isNotEmpty) {
@@ -255,14 +261,14 @@ class _ServerSettingsSheetState extends State<ServerSettingsSheet> {
               decoration: InputDecoration(
                 filled: true,
                 fillColor: AppColors.surfaceHighlight,
-                hintText: 'https://...',
+                hintText: PocketBaseClient.defaultPocketBaseUrl,
                 hintStyle: AppTypography.bodyMedium.copyWith(color: AppColors.textTertiary),
                 prefixIcon: const Icon(Icons.link_rounded, color: AppColors.secondarySlate, size: 20),
                 suffixIcon: IconButton(
                   icon: const Icon(Icons.restart_alt_rounded, color: AppColors.secondarySlate, size: 20),
-                  tooltip: 'Yerel Sunucuya Sıfırla',
+                  tooltip: 'Ngrok Domainine Sıfırla',
                   onPressed: () {
-                    _urlController.text = 'http://127.0.0.1:8090';
+                    _urlController.text = PocketBaseClient.defaultPocketBaseUrl;
                   },
                 ),
                 border: OutlineInputBorder(

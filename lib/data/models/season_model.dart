@@ -60,4 +60,26 @@ class SeasonModel {
       airDate: json['air_date'] != null ? DateTime.tryParse(json['air_date'] as String) : null,
     );
   }
+
+  SeasonModel copyWith({
+    int? id,
+    int? showId,
+    int? seasonNumber,
+    String? name,
+    String? overview,
+    String? posterPath,
+    int? episodeCount,
+    DateTime? airDate,
+  }) {
+    return SeasonModel(
+      id: id ?? this.id,
+      showId: showId ?? this.showId,
+      seasonNumber: seasonNumber ?? this.seasonNumber,
+      name: name ?? this.name,
+      overview: overview ?? this.overview,
+      posterPath: posterPath ?? this.posterPath,
+      episodeCount: episodeCount ?? this.episodeCount,
+      airDate: airDate ?? this.airDate,
+    );
+  }
 }

@@ -182,14 +182,15 @@ class _CloudSyncCardState extends State<CloudSyncCard> {
                       IconButton(
                         icon: const Icon(Icons.logout_rounded, size: 20, color: AppColors.errorRed),
                         tooltip: 'Çıkış Yap',
-                        onPressed: () {
-                          _auth.logout();
+                        onPressed: () async {
+                          await _auth.logout();
+                          if (!context.mounted) return;
                           setState(() {});
                           if (mounted) {
                             ScaffoldMessenger.of(context).showSnackBar(
                               const SnackBar(
                                 backgroundColor: AppColors.surfaceHighlight,
-                                content: Text('PocketBase oturumu kapatıldı.'),
+                                content: Text('PocketBase oturumu kapatıldı ve yerel veriler temizlendi.'),
                               ),
                             );
                           }
