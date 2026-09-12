@@ -907,6 +907,57 @@ class DatabaseService {
   List<ShowModel> getFollowedShows() =>
       _shows.values.where((s) => s.isFollowed).toList();
 
+  /// Gets the most recent watch timestamp for a show from watch records.
+  DateTime? getLastWatchedDateForShow(int showId) {
+    DateTime? latest;
+    final show = _shows[showId];
+    final tvdbId = show?.tvdbId;
+    final tmdbId = show?.tmdbId;
+
+    for (final r in _watchRecords) {
+      final matches = r.showId == showId ||
+          (tvdbId != null && tvdbId > 0 && r.tvdbId == tvdbId) ||
+          (tmdbId != null && tmdbId > 0 && r.showId == tmdbId);
+      if (matches) {
+        if (latest == null || r.watchedAt.isAfter(latest)) {
+          latest = r.watchedAt;
+        }
+      }
+    }
+    return latest;
+  }
+
+  /// Returns followed shows sorted by most recent watch activity,
+  /// falling back to updated/created date or ID desc.
+  List<ShowModel> getRecentlyActiveFollowedShows({int? limit}) {
+    final followed = getFollowedShows();
+    followed.sort((a, b) {
+      final aDate = getLastWatchedDateForShow(a.id);
+      final bDate = getLastWatchedDateForShow(b.id);
+      if (aDate != null && bDate != null) {
+        return bDate.compareTo(aDate);
+      }
+      if (aDate != null) return -1;
+      if (bDate != null) return 1;
+
+      // Fallback: updatedAt or createdAt or id desc
+      final aUpdated = a.updatedAt ?? a.createdAt;
+      final bUpdated = b.updatedAt ?? b.createdAt;
+      if (aUpdated != null && bUpdated != null) {
+        return bUpdated.compareTo(aUpdated);
+      }
+      if (aUpdated != null) return -1;
+      if (bUpdated != null) return 1;
+
+      return b.id.compareTo(a.id);
+    });
+
+    if (limit != null && limit > 0 && followed.length > limit) {
+      return followed.sublist(0, limit);
+    }
+    return followed;
+  }
+
   ShowModel? getShowById(int id) {
     if (_shows.containsKey(id)) return _shows[id];
     for (final s in _shows.values) {
