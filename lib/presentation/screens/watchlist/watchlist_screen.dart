@@ -8,6 +8,7 @@ import '../../../data/models/show_model.dart';
 import '../../../data/models/movie_model.dart';
 import '../episode_detail/episode_detail_screen.dart';
 import '../show_detail/show_detail_screen.dart';
+import '../my_shows/my_shows_screen.dart';
 import '../../common/custom_poster_image.dart';
 import 'widgets/up_next_card.dart';
 import 'widgets/watchlist_item_tile.dart';
@@ -159,10 +160,83 @@ class _WatchlistScreenState extends State<WatchlistScreen> {
                 ),
               ),
 
+              // Section Header: "Dizilerim" & "Tümünü Gör >"
+              SliverToBoxAdapter(
+                child: StreamBuilder<List<ShowModel>>(
+                  stream: _dbService.showsStream,
+                  builder: (context, snapshot) {
+                    final allFollowed = _dbService.getFollowedShows();
+                    if (allFollowed.isEmpty) return const SizedBox.shrink();
+
+                    final totalCount = allFollowed.length;
+                    final shownCount = totalCount > 10 ? 10 : totalCount;
+
+                    return Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          Row(
+                            children: [
+                              const Text(
+                                'Dizilerim',
+                                style: TextStyle(
+                                  color: AppColors.textPrimary,
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.w800,
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                                decoration: BoxDecoration(
+                                  color: AppColors.surfaceHighlight,
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(color: AppColors.borderStroke, width: 0.5),
+                                ),
+                                child: Text(
+                                  '$shownCount / $totalCount',
+                                  style: const TextStyle(
+                                    color: AppColors.primaryAccent,
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          GestureDetector(
+                            onTap: () {
+                              Navigator.of(context).push(
+                                MaterialPageRoute(
+                                  builder: (context) => const MyShowsScreen(),
+                                ),
+                              );
+                            },
+                            child: const Padding(
+                              padding: EdgeInsets.symmetric(vertical: 4),
+                              child: Text(
+                                'Tümünü Gör >',
+                                style: TextStyle(
+                                  color: AppColors.primaryAccent,
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+              ),
+
               // Filter Chips (All, In Progress, Completed)
               SliverToBoxAdapter(
                 child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                   child: Row(
                     children: [
                       _buildFilterChip('All'),
@@ -175,21 +249,48 @@ class _WatchlistScreenState extends State<WatchlistScreen> {
                 ),
               ),
 
-              // Watchlist Vertical Stream
+              // Watchlist Vertical Stream (Top 10 most recently active shows)
               StreamBuilder<List<ShowModel>>(
                 stream: _dbService.showsStream,
                 builder: (context, snapshot) {
-                  var shows = _dbService.getFollowedShows();
+                  var shows = _dbService.getRecentlyActiveFollowedShows();
                   if (_filterCategory == 'In Progress') {
                     shows = shows.where((s) => !s.isCompleted).toList();
                   } else if (_filterCategory == 'Completed') {
                     shows = shows.where((s) => s.isCompleted).toList();
                   }
 
+                  final totalShowsCount = shows.length;
+                  final hasMore = totalShowsCount > 10;
+                  final displayedShows = shows.take(10).toList();
+
+                  if (displayedShows.isEmpty) {
+                    return const SliverToBoxAdapter(
+                      child: Padding(
+                        padding: EdgeInsets.symmetric(vertical: 36),
+                        child: Center(
+                          child: Text(
+                            'Takip edilen dizi bulunmuyor.',
+                            style: TextStyle(color: AppColors.secondarySlate, fontSize: 14),
+                          ),
+                        ),
+                      ),
+                    );
+                  }
+
                   return SliverList(
                     delegate: SliverChildBuilderDelegate(
                       (context, index) {
-                        final show = shows[index];
+                        // Trailing "Show More" Button Card
+                        if (index == displayedShows.length) {
+                          return _buildShowMoreButton(
+                            context,
+                            totalShowsCount,
+                            totalShowsCount - 10,
+                          );
+                        }
+
+                        final show = displayedShows[index];
                         if ((show.posterPath == null || show.posterPath!.isEmpty) && !_enrichingShowIds.contains(show.id)) {
                           _enrichingShowIds.add(show.id);
                           WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -211,7 +312,7 @@ class _WatchlistScreenState extends State<WatchlistScreen> {
                           },
                         );
                       },
-                      childCount: shows.length,
+                      childCount: displayedShows.length + (hasMore ? 1 : 0),
                     ),
                   );
                 },
@@ -309,6 +410,66 @@ class _WatchlistScreenState extends State<WatchlistScreen> {
           style: AppTypography.bodySmall.copyWith(
             fontWeight: isSelected ? FontWeight.w700 : FontWeight.w500,
             color: isSelected ? AppColors.primaryAccent : AppColors.secondarySlate,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildShowMoreButton(BuildContext context, int totalCount, int remainingCount) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: () => Navigator.of(context).push(
+            MaterialPageRoute(builder: (context) => const MyShowsScreen()),
+          ),
+          borderRadius: BorderRadius.circular(16),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+            decoration: BoxDecoration(
+              color: AppColors.cardSurface,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: AppColors.borderStroke),
+            ),
+            child: Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: AppColors.primaryAccent.withValues(alpha: 0.15),
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(Icons.grid_view_rounded, color: AppColors.primaryAccent, size: 20),
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Tüm Dizilerimi Gör',
+                        style: TextStyle(
+                          color: AppColors.textPrimary,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        '+$remainingCount dizi daha kütüphanenizde',
+                        style: const TextStyle(
+                          color: AppColors.secondarySlate,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const Icon(Icons.arrow_forward_ios_rounded, color: AppColors.secondarySlate, size: 16),
+              ],
+            ),
           ),
         ),
       ),
