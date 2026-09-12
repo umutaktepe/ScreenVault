@@ -34,7 +34,7 @@ class PocketBaseClient {
   }
 
   // Default local network PocketBase address
-  static const String defaultPocketBaseUrl = 'http://192.168.1.108:8090';
+  static const String defaultPocketBaseUrl = 'http://192.168.140.35:8090';
 
   static String get _defaultUrl {
     const fromEnv = String.fromEnvironment('POCKETBASE_URL');
@@ -70,6 +70,7 @@ class PocketBaseClient {
     if (savedUrl != null &&
         savedUrl.isNotEmpty &&
         savedUrl != 'http://127.0.0.1:8090' &&
+        savedUrl != 'http://192.168.1.108:8090' &&
         !savedUrl.contains('ngrok')) {
       _currentUrl = savedUrl;
     } else {

@@ -428,6 +428,9 @@ void main() {
       // Verify search input prefilled with clean title
       final textField = tester.widget<TextField>(find.byType(TextField));
       expect(textField.controller?.text, 'Lost in Space');
+
+      // Flush any pending network/debounce timers before test exit
+      await tester.pump(const Duration(seconds: 1));
     });
 
     testWidgets('ImportReconciliationSheet does not auto-search placeholder titles', (tester) async {
