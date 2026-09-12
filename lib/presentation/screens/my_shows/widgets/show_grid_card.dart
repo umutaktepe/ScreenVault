@@ -19,9 +19,10 @@ class ShowGridCard extends StatelessWidget {
     final progress = show.progress;
     final isCompleted = show.isCompleted;
 
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
+    return RepaintBoundary(
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
         decoration: BoxDecoration(
           color: AppColors.cardSurface,
           borderRadius: BorderRadius.circular(12),
@@ -158,6 +159,7 @@ class ShowGridCard extends StatelessWidget {
           ],
         ),
       ),
+    ),
     );
   }
 }

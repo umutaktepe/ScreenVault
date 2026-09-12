@@ -33,7 +33,6 @@ class _WatchlistScreenState extends State<WatchlistScreen> {
   @override
   void initState() {
     super.initState();
-    _dbService.init();
   }
 
   @override

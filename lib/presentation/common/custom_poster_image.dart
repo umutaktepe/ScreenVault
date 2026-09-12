@@ -12,6 +12,8 @@ class CustomPosterImage extends StatelessWidget {
   final double borderRadius;
   final BoxFit fit;
   final String size;
+  final int? memCacheWidth;
+  final int? memCacheHeight;
 
   static const Set<String> _mockPaths = {
     '/7bu30eqzkh9PSSt089V6B4Jz4k1.jpg',
@@ -32,7 +34,9 @@ class CustomPosterImage extends StatelessWidget {
     this.height,
     this.borderRadius = 12.0,
     this.fit = BoxFit.cover,
-    this.size = 'w500',
+    this.size = 'w342',
+    this.memCacheWidth,
+    this.memCacheHeight,
   });
 
   static bool _isValidPath(String? p) {
@@ -49,6 +53,9 @@ class CustomPosterImage extends StatelessWidget {
     final fullUrl = TmdbEndpoints.imageUrl(targetPath, size: size);
     final fallbackUrl = effectiveFallback != null ? TmdbEndpoints.imageUrl(effectiveFallback, size: size) : '';
 
+    final cacheWidth = memCacheWidth ?? (width != null ? (width! * 2).toInt() : 250);
+    final cacheHeight = memCacheHeight ?? (height != null ? (height! * 2).toInt() : null);
+
     return ClipRRect(
       borderRadius: BorderRadius.circular(borderRadius),
       child: Container(
@@ -60,6 +67,8 @@ class CustomPosterImage extends StatelessWidget {
                 imageUrl: fullUrl,
                 width: width,
                 height: height,
+                memCacheWidth: cacheWidth,
+                memCacheHeight: cacheHeight,
                 fit: fit,
                 placeholder: (context, url) => Container(
                   color: AppColors.surfaceHighlight,
@@ -81,6 +90,8 @@ class CustomPosterImage extends StatelessWidget {
                       imageUrl: fallbackUrl,
                       width: width,
                       height: height,
+                      memCacheWidth: cacheWidth,
+                      memCacheHeight: cacheHeight,
                       fit: fit,
                       placeholder: (context, url) => Container(
                         color: AppColors.surfaceHighlight,

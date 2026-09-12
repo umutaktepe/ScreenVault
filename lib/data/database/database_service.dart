@@ -39,6 +39,9 @@ class DatabaseService {
   final List<WatchRecordModel> _watchRecords = [];
   final List<FriendModel> _friends = [];
   final List<UnresolvedItemModel> _unresolvedItems = [];
+  final Map<int, DateTime> _showLastWatchedMap = {};
+  final Map<int, DateTime> _tvdbLastWatchedMap = {};
+  List<ShowModel>? _cachedRecentlyActiveFollowedShows;
 
   final _showsController = StreamController<List<ShowModel>>.broadcast();
   final _statsController = StreamController<UserStatsModel>.broadcast();
@@ -574,6 +577,7 @@ class DatabaseService {
       ));
     }
 
+    _rebuildLastWatchedMap();
     _notify();
     unawaited(enrichAllMissingMetadata());
   }
@@ -585,6 +589,9 @@ class DatabaseService {
     await _db.delete(_db.importQueueTable).go();
     _watchRecords.clear();
     _friends.clear();
+    _showLastWatchedMap.clear();
+    _tvdbLastWatchedMap.clear();
+    _cachedRecentlyActiveFollowedShows = null;
 
     // Reset all episodes watch status in SQLite and memory
     await _db.update(_db.episodesTable).write(
@@ -881,6 +888,7 @@ class DatabaseService {
   }
 
   void _notify({bool immediate = false}) {
+    _cachedRecentlyActiveFollowedShows = null;
     if (!_showsController.isClosed) {
       _showsController.add(getAllShows());
     }
@@ -907,20 +915,64 @@ class DatabaseService {
   List<ShowModel> getFollowedShows() =>
       _shows.values.where((s) => s.isFollowed).toList();
 
-  /// Gets the most recent watch timestamp for a show from watch records.
-  DateTime? getLastWatchedDateForShow(int showId) {
-    DateTime? latest;
-    final show = _shows[showId];
-    final tvdbId = show?.tvdbId;
-    final tmdbId = show?.tmdbId;
+  /// Rebuilds the O(1) watch date index from _watchRecords in a single pass.
+  void _rebuildLastWatchedMap() {
+    _showLastWatchedMap.clear();
+    _tvdbLastWatchedMap.clear();
+    _cachedRecentlyActiveFollowedShows = null;
 
     for (final r in _watchRecords) {
-      final matches = r.showId == showId ||
-          (tvdbId != null && tvdbId > 0 && r.tvdbId == tvdbId) ||
-          (tmdbId != null && tmdbId > 0 && r.showId == tmdbId);
-      if (matches) {
-        if (latest == null || r.watchedAt.isAfter(latest)) {
-          latest = r.watchedAt;
+      final watchedAt = r.watchedAt;
+      final showId = r.showId;
+      if (showId != null) {
+        final existing = _showLastWatchedMap[showId];
+        if (existing == null || watchedAt.isAfter(existing)) {
+          _showLastWatchedMap[showId] = watchedAt;
+        }
+      }
+
+      final tvdbId = r.tvdbId ?? r.sId;
+      if (tvdbId != null && tvdbId > 0) {
+        final existing = _tvdbLastWatchedMap[tvdbId];
+        if (existing == null || watchedAt.isAfter(existing)) {
+          _tvdbLastWatchedMap[tvdbId] = watchedAt;
+        }
+      }
+    }
+  }
+
+  /// Records latest watch date for a show in O(1).
+  void _recordLastWatched(int? showId, int? tvdbId, DateTime watchedAt) {
+    if (showId != null) {
+      final existing = _showLastWatchedMap[showId];
+      if (existing == null || watchedAt.isAfter(existing)) {
+        _showLastWatchedMap[showId] = watchedAt;
+      }
+    }
+    if (tvdbId != null && tvdbId > 0) {
+      final existing = _tvdbLastWatchedMap[tvdbId];
+      if (existing == null || watchedAt.isAfter(existing)) {
+        _tvdbLastWatchedMap[tvdbId] = watchedAt;
+      }
+    }
+    _cachedRecentlyActiveFollowedShows = null;
+  }
+
+  /// Gets the most recent watch timestamp for a show in O(1) from indexed hash maps.
+  DateTime? getLastWatchedDateForShow(int showId) {
+    DateTime? latest = _showLastWatchedMap[showId];
+    final show = _shows[showId];
+    if (show != null) {
+      if (show.tvdbId != null && show.tvdbId! > 0) {
+        final tvdbDate = _tvdbLastWatchedMap[show.tvdbId!];
+        if (tvdbDate != null && (latest == null || tvdbDate.isAfter(latest))) {
+          latest = tvdbDate;
+        }
+      }
+      if (show.tmdbId != null && show.tmdbId! > 0) {
+        final tmdbDate = _showLastWatchedMap[show.tmdbId!];
+        if (tmdbDate != null && (latest == null || tmdbDate.isAfter(latest))) {
+          latest = tmdbDate;
         }
       }
     }
@@ -929,33 +981,42 @@ class DatabaseService {
 
   /// Returns followed shows sorted by most recent watch activity,
   /// falling back to updated/created date or ID desc.
+  /// Memoized and pre-indexed for high-performance (120 FPS UI).
   List<ShowModel> getRecentlyActiveFollowedShows({int? limit}) {
-    final followed = getFollowedShows();
-    followed.sort((a, b) {
-      final aDate = getLastWatchedDateForShow(a.id);
-      final bDate = getLastWatchedDateForShow(b.id);
-      if (aDate != null && bDate != null) {
-        return bDate.compareTo(aDate);
-      }
-      if (aDate != null) return -1;
-      if (bDate != null) return 1;
+    if (_cachedRecentlyActiveFollowedShows == null) {
+      final followed = getFollowedShows();
+      final dateMap = <int, DateTime?>{
+        for (final s in followed) s.id: getLastWatchedDateForShow(s.id),
+      };
 
-      // Fallback: updatedAt or createdAt or id desc
-      final aUpdated = a.updatedAt ?? a.createdAt;
-      final bUpdated = b.updatedAt ?? b.createdAt;
-      if (aUpdated != null && bUpdated != null) {
-        return bUpdated.compareTo(aUpdated);
-      }
-      if (aUpdated != null) return -1;
-      if (bUpdated != null) return 1;
+      followed.sort((a, b) {
+        final aDate = dateMap[a.id];
+        final bDate = dateMap[b.id];
+        if (aDate != null && bDate != null) {
+          return bDate.compareTo(aDate);
+        }
+        if (aDate != null) return -1;
+        if (bDate != null) return 1;
 
-      return b.id.compareTo(a.id);
-    });
+        // Fallback: updatedAt or createdAt or id desc
+        final aUpdated = a.updatedAt ?? a.createdAt;
+        final bUpdated = b.updatedAt ?? b.createdAt;
+        if (aUpdated != null && bUpdated != null) {
+          return bUpdated.compareTo(aUpdated);
+        }
+        if (aUpdated != null) return -1;
+        if (bUpdated != null) return 1;
 
-    if (limit != null && limit > 0 && followed.length > limit) {
-      return followed.sublist(0, limit);
+        return b.id.compareTo(a.id);
+      });
+      _cachedRecentlyActiveFollowedShows = followed;
     }
-    return followed;
+
+    final list = _cachedRecentlyActiveFollowedShows!;
+    if (limit != null && limit > 0 && list.length > limit) {
+      return list.sublist(0, limit);
+    }
+    return List.of(list);
   }
 
   ShowModel? getShowById(int id) {
@@ -2012,6 +2073,7 @@ class DatabaseService {
   // --- Watch Records & Stats ---
   void addWatchRecord(WatchRecordModel record) {
     _watchRecords.add(record);
+    _recordLastWatched(record.showId, record.tvdbId ?? record.sId, record.watchedAt);
     _db.into(_db.episodeWatchHistoryTable).insert(
           EpisodeWatchHistoryTableCompanion.insert(
             title: record.title,
@@ -2032,6 +2094,9 @@ class DatabaseService {
   Future<void> addWatchRecordsBatch(List<WatchRecordModel> records) async {
     if (records.isEmpty) return;
     _watchRecords.addAll(records);
+    for (final r in records) {
+      _recordLastWatched(r.showId, r.tvdbId ?? r.sId, r.watchedAt);
+    }
     await _db.batch((batch) {
       batch.insertAll(
         _db.episodeWatchHistoryTable,
@@ -2278,6 +2343,7 @@ class DatabaseService {
         r.seasonNumber == record.seasonNumber &&
         r.episodeNumber == record.episodeNumber);
     _watchRecords.add(record.copyWith(showId: resolvedShowId, tvdbId: resolvedTvdbId));
+    _recordLastWatched(resolvedShowId, resolvedTvdbId, record.watchedAt);
 
     await _db.into(_db.episodeWatchHistoryTable).insertOnConflictUpdate(
           EpisodeWatchHistoryTableCompanion.insert(

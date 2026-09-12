@@ -104,18 +104,26 @@ class _MyShowsScreenState extends State<MyShowsScreen> {
     }
 
     // 5. Sorting
-    list.sort((a, b) {
-      switch (_filterResult.sortOption) {
-        case ShowSortOption.recentlyActive:
-          final aDate = _dbService.getLastWatchedDateForShow(a.id);
-          final bDate = _dbService.getLastWatchedDateForShow(b.id);
-          if (aDate != null && bDate != null) return bDate.compareTo(aDate);
-          if (aDate != null) return -1;
-          if (bDate != null) return 1;
-          final aTime = a.updatedAt ?? a.createdAt;
-          final bTime = b.updatedAt ?? b.createdAt;
-          if (aTime != null && bTime != null) return bTime.compareTo(aTime);
-          return b.id.compareTo(a.id);
+    if (_filterResult.sortOption == ShowSortOption.recentlyActive) {
+      final dateMap = <int, DateTime?>{
+        for (final s in list) s.id: _dbService.getLastWatchedDateForShow(s.id),
+      };
+      list.sort((a, b) {
+        final aDate = dateMap[a.id];
+        final bDate = dateMap[b.id];
+        if (aDate != null && bDate != null) return bDate.compareTo(aDate);
+        if (aDate != null) return -1;
+        if (bDate != null) return 1;
+        final aTime = a.updatedAt ?? a.createdAt;
+        final bTime = b.updatedAt ?? b.createdAt;
+        if (aTime != null && bTime != null) return bTime.compareTo(aTime);
+        return b.id.compareTo(a.id);
+      });
+    } else {
+      list.sort((a, b) {
+        switch (_filterResult.sortOption) {
+          case ShowSortOption.recentlyActive:
+            return 0; // Handled above
 
         case ShowSortOption.nameAsc:
           return a.name.toLowerCase().compareTo(b.name.toLowerCase());
@@ -140,9 +148,10 @@ class _MyShowsScreenState extends State<MyShowsScreen> {
           return b.progress.compareTo(a.progress);
       }
     });
-
-    return list;
   }
+
+  return list;
+}
 
   void _openFilterSheet(List<ShowModel> allFollowed) async {
     final availableGenres = _extractAvailableGenres(allFollowed);

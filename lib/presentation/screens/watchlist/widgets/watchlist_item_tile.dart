@@ -18,9 +18,10 @@ class WatchlistItemTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
+    return RepaintBoundary(
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
         margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
         padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(
@@ -122,6 +123,7 @@ class WatchlistItemTile extends StatelessWidget {
           ],
         ),
       ),
+    ),
     );
   }
 }

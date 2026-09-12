@@ -77,4 +77,46 @@ void main() {
     expect(limited.length, 2);
     expect(limited.map((s) => s.id).toList(), [10, 30]);
   });
+
+  test('getRecentlyActiveFollowedShows performance with 100 shows and 8000 watch records executes repeated calls under 10ms', () async {
+    for (int i = 1; i <= 100; i++) {
+      await db.upsertShow(ShowModel(
+        id: i,
+        name: 'Show $i',
+        isFollowed: true,
+        totalEpisodes: 20,
+      ), notify: false);
+    }
+
+    final records = <WatchRecordModel>[];
+    final baseTime = DateTime.now();
+    for (int i = 1; i <= 8000; i++) {
+      final showId = (i % 100) + 1;
+      records.add(WatchRecordModel(
+        id: i,
+        showId: showId,
+        seasonNumber: 1,
+        episodeNumber: (i % 20) + 1,
+        title: 'Episode $i',
+        runtimeMinutes: 40,
+        watchedAt: baseTime.subtract(Duration(minutes: i)),
+      ));
+    }
+    await db.addWatchRecordsBatch(records);
+
+    final stopwatch = Stopwatch()..start();
+    // Simulate 10 UI frame builds during scrolling
+    for (int frame = 0; frame < 10; frame++) {
+      final recent = db.getRecentlyActiveFollowedShows(limit: 10);
+      expect(recent.length, 10);
+      expect(recent.first.id, 2);
+    }
+    stopwatch.stop();
+
+    // 10 frame builds with unindexed 8,000 records currently takes ~300-800ms.
+    // With O(1) index and memoization, 10 calls must take < 5ms total!
+    expect(stopwatch.elapsedMilliseconds, lessThan(10),
+        reason: '10 repeated calls during scrolling should take < 10ms total (elapsed: ${stopwatch.elapsedMilliseconds}ms)');
+  });
 }
+
