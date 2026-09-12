@@ -31,6 +31,7 @@ class _MyShowsScreenState extends State<MyShowsScreen> {
   String _quickStatus = 'Tümü'; // 'Tümü', 'Devam Eden', 'Tamamlanan', 'Başlanmayan'
   int _displayedCount = _pageSize;
   int _lastFilteredCount = 0;
+  bool _isLoadingMore = false;
 
   MyShowsFilterResult _filterResult = const MyShowsFilterResult(
     sortOption: ShowSortOption.recentlyActive,
@@ -47,6 +48,7 @@ class _MyShowsScreenState extends State<MyShowsScreen> {
         setState(() {
           _searchQuery = text;
           _displayedCount = _pageSize;
+          _isLoadingMore = false;
         });
       }
     });
@@ -60,16 +62,32 @@ class _MyShowsScreenState extends State<MyShowsScreen> {
   }
 
   void _onScroll() {
-    if (!_scrollController.hasClients) return;
+    if (!_scrollController.hasClients || _isLoadingMore) return;
     final maxScroll = _scrollController.position.maxScrollExtent;
     final currentScroll = _scrollController.position.pixels;
-    if (currentScroll >= maxScroll - 300) {
+    // Trigger when user approaches the end of currently loaded batch (within 100px)
+    if (maxScroll > 0 && currentScroll >= maxScroll - 100) {
       if (_displayedCount < _lastFilteredCount) {
-        setState(() {
-          _displayedCount = (_displayedCount + _pageSize).clamp(0, _lastFilteredCount);
-        });
+        _loadMore();
       }
     }
+  }
+
+  Future<void> _loadMore() async {
+    if (_isLoadingMore) return;
+    setState(() {
+      _isLoadingMore = true;
+    });
+
+    // Provide a brief tactile loading delay (300ms) to prevent cascading momentum flings
+    // and give visual feedback to the user that a new batch of 20 is being fetched
+    await Future.delayed(const Duration(milliseconds: 300));
+    if (!mounted) return;
+
+    setState(() {
+      _displayedCount = (_displayedCount + _pageSize).clamp(0, _lastFilteredCount);
+      _isLoadingMore = false;
+    });
   }
 
   List<String> _extractAvailableGenres(List<ShowModel> shows) {
@@ -217,6 +235,10 @@ class _MyShowsScreenState extends State<MyShowsScreen> {
           stream: _dbService.showsStream,
           builder: (context, snapshot) {
             final followedCount = _dbService.getFollowedShows().length;
+            final totalCount = _lastFilteredCount > 0 ? _lastFilteredCount : followedCount;
+            final countLabel = totalCount <= _pageSize
+                ? '$totalCount'
+                : '${_displayedCount.clamp(0, totalCount)} / $totalCount';
             return Row(
               children: [
                 const Text(
@@ -236,7 +258,7 @@ class _MyShowsScreenState extends State<MyShowsScreen> {
                     border: Border.all(color: AppColors.borderStroke, width: 0.5),
                   ),
                   child: Text(
-                    '$followedCount',
+                    countLabel,
                     style: const TextStyle(
                       color: AppColors.primaryAccent,
                       fontSize: 12,
@@ -552,7 +574,12 @@ class _MyShowsScreenState extends State<MyShowsScreen> {
                   ),
                 ),
 
-              if (paginatedShows.isNotEmpty && _displayedCount >= filteredShows.length)
+              // Loading More Indicator (only active while fetching next batch)
+              if (_isLoadingMore)
+                _buildLoadingIndicator(),
+
+              // End of List Indicator (when all items loaded)
+              if (!_isLoadingMore && paginatedShows.isNotEmpty && _displayedCount >= filteredShows.length)
                 _buildEndOfListIndicator(filteredShows.length),
 
               // Bottom Padding for smooth scrolling
@@ -562,6 +589,38 @@ class _MyShowsScreenState extends State<MyShowsScreen> {
             ],
           );
         },
+      ),
+    );
+  }
+
+  Widget _buildLoadingIndicator() {
+    return SliverToBoxAdapter(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 24),
+        child: Center(
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: AppColors.primaryAccent,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Text(
+                'Daha fazla dizi yükleniyor...',
+                style: TextStyle(
+                  color: AppColors.secondarySlate.withValues(alpha: 0.8),
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

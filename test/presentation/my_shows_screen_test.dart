@@ -198,4 +198,34 @@ void main() {
     expect(find.byIcon(Icons.movie_filter_outlined), findsNothing);
     expect(find.textContaining('dizi listelendi'), findsNothing);
   });
+
+  testWidgets('MyShowsScreen displays dynamic count badge in AppBar (20 / 35 then 35)', (tester) async {
+    tester.view.physicalSize = const Size(800, 3000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+
+    for (int i = 35; i >= 1; i--) {
+      await db.upsertShow(ShowModel(
+        id: i,
+        name: 'Dizi $i',
+        isFollowed: true,
+        genres: const ['Drama'],
+        firstAirDate: DateTime(2020, 1, 1),
+      ), notify: false);
+    }
+    await tester.pump(const Duration(milliseconds: 200));
+
+    await tester.pumpWidget(const MaterialApp(home: MyShowsScreen()));
+    await tester.pumpAndSettle();
+
+    // Initially shows 20 / 35
+    expect(find.text('20 / 35'), findsOneWidget);
+
+    // Scroll to load remaining
+    await tester.drag(find.byType(CustomScrollView), const Offset(0, -1200));
+    await tester.pumpAndSettle();
+
+    // Now all 35 loaded
+    expect(find.text('35 / 35'), findsOneWidget);
+  });
 }
