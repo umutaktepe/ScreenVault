@@ -552,6 +552,9 @@ class _MyShowsScreenState extends State<MyShowsScreen> {
                   ),
                 ),
 
+              if (paginatedShows.isNotEmpty && _displayedCount >= filteredShows.length)
+                _buildEndOfListIndicator(filteredShows.length),
+
               // Bottom Padding for smooth scrolling
               const SliverToBoxAdapter(
                 child: SizedBox(height: 48),
@@ -559,6 +562,52 @@ class _MyShowsScreenState extends State<MyShowsScreen> {
             ],
           );
         },
+      ),
+    );
+  }
+
+  Widget _buildEndOfListIndicator(int totalCount) {
+    return SliverToBoxAdapter(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(24, 16, 24, 36),
+        child: Row(
+          children: [
+            Expanded(
+              child: Divider(
+                color: AppColors.borderStroke.withValues(alpha: 0.6),
+                thickness: 0.8,
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(
+                    Icons.movie_filter_outlined,
+                    color: AppColors.secondarySlate,
+                    size: 15,
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    'Tüm $totalCount dizi listelendi',
+                    style: const TextStyle(
+                      color: AppColors.secondarySlate,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: Divider(
+                color: AppColors.borderStroke.withValues(alpha: 0.6),
+                thickness: 0.8,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

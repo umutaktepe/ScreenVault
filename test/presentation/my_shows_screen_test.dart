@@ -132,4 +132,70 @@ void main() {
     expect(find.text('Dizi 20'), findsOneWidget);
     expect(find.text('Dizi 25'), findsNothing);
   });
+
+  testWidgets('MyShowsScreen displays end-of-list indicator when all items are loaded', (tester) async {
+    tester.view.physicalSize = const Size(800, 2000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+
+    for (int i = 1; i <= 5; i++) {
+      await db.upsertShow(ShowModel(
+        id: i,
+        name: 'Dizi $i',
+        isFollowed: true,
+        genres: const ['Drama'],
+        firstAirDate: DateTime(2020, 1, 1),
+      ), notify: false);
+    }
+    await tester.pump(const Duration(milliseconds: 200));
+
+    await tester.pumpWidget(const MaterialApp(home: MyShowsScreen()));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('Tüm 5 dizi listelendi'), findsOneWidget);
+    expect(find.byIcon(Icons.movie_filter_outlined), findsOneWidget);
+  });
+
+  testWidgets('MyShowsScreen shows end-of-list indicator only after scrolling to bottom with multiple pages', (tester) async {
+    tester.view.physicalSize = const Size(800, 3000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+
+    for (int i = 35; i >= 1; i--) {
+      await db.upsertShow(ShowModel(
+        id: i,
+        name: 'Dizi $i',
+        isFollowed: true,
+        genres: const ['Drama'],
+        firstAirDate: DateTime(2020, 1, 1),
+      ), notify: false);
+    }
+    await tester.pump(const Duration(milliseconds: 200));
+
+    await tester.pumpWidget(const MaterialApp(home: MyShowsScreen()));
+    await tester.pumpAndSettle();
+
+    // With 35 items and 20 per page, initially indicator should not be shown
+    expect(find.textContaining('Tüm 35 dizi listelendi'), findsNothing);
+    expect(find.byIcon(Icons.movie_filter_outlined), findsNothing);
+
+    // Trigger loading next page
+    await tester.drag(find.byType(CustomScrollView), const Offset(0, -1200));
+    await tester.pumpAndSettle();
+
+    // Scroll until indicator is visible
+    await tester.scrollUntilVisible(find.byIcon(Icons.movie_filter_outlined), 500);
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('Tüm 35 dizi listelendi'), findsOneWidget);
+    expect(find.byIcon(Icons.movie_filter_outlined), findsOneWidget);
+  });
+
+  testWidgets('MyShowsScreen does not display end-of-list indicator when show list is empty', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: MyShowsScreen()));
+    await tester.pumpAndSettle();
+
+    expect(find.byIcon(Icons.movie_filter_outlined), findsNothing);
+    expect(find.textContaining('dizi listelendi'), findsNothing);
+  });
 }
