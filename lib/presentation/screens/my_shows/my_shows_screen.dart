@@ -20,12 +20,17 @@ class MyShowsScreen extends StatefulWidget {
 }
 
 class _MyShowsScreenState extends State<MyShowsScreen> {
+  static const int _pageSize = 20;
+
   final DatabaseService _dbService = DatabaseService();
   final TextEditingController _searchController = TextEditingController();
+  final ScrollController _scrollController = ScrollController();
 
   bool _isGridView = true;
   String _searchQuery = '';
   String _quickStatus = 'Tümü'; // 'Tümü', 'Devam Eden', 'Tamamlanan', 'Başlanmayan'
+  int _displayedCount = _pageSize;
+  int _lastFilteredCount = 0;
 
   MyShowsFilterResult _filterResult = const MyShowsFilterResult(
     sortOption: ShowSortOption.recentlyActive,
@@ -35,18 +40,36 @@ class _MyShowsScreenState extends State<MyShowsScreen> {
   @override
   void initState() {
     super.initState();
+    _scrollController.addListener(_onScroll);
     _searchController.addListener(() {
       final text = _searchController.text.trim();
       if (text != _searchQuery) {
-        setState(() => _searchQuery = text);
+        setState(() {
+          _searchQuery = text;
+          _displayedCount = _pageSize;
+        });
       }
     });
   }
 
   @override
   void dispose() {
+    _scrollController.dispose();
     _searchController.dispose();
     super.dispose();
+  }
+
+  void _onScroll() {
+    if (!_scrollController.hasClients) return;
+    final maxScroll = _scrollController.position.maxScrollExtent;
+    final currentScroll = _scrollController.position.pixels;
+    if (currentScroll >= maxScroll - 300) {
+      if (_displayedCount < _lastFilteredCount) {
+        setState(() {
+          _displayedCount = (_displayedCount + _pageSize).clamp(0, _lastFilteredCount);
+        });
+      }
+    }
   }
 
   List<String> _extractAvailableGenres(List<ShowModel> shows) {
@@ -171,7 +194,10 @@ class _MyShowsScreenState extends State<MyShowsScreen> {
     );
 
     if (result != null) {
-      setState(() => _filterResult = result);
+      setState(() {
+        _filterResult = result;
+        _displayedCount = _pageSize;
+      });
     }
   }
 
@@ -277,8 +303,11 @@ class _MyShowsScreenState extends State<MyShowsScreen> {
         builder: (context, snapshot) {
           final allFollowed = _dbService.getFollowedShows();
           final filteredShows = _filterAndSortShows(allFollowed);
+          _lastFilteredCount = filteredShows.length;
+          final paginatedShows = filteredShows.take(_displayedCount).toList();
 
           return CustomScrollView(
+            controller: _scrollController,
             physics: const AlwaysScrollableScrollPhysics(parent: ClampingScrollPhysics()),
             slivers: [
               // Sticky-style Search & Quick Filter Controls
@@ -365,6 +394,7 @@ class _MyShowsScreenState extends State<MyShowsScreen> {
                                 sortOption: ShowSortOption.recentlyActive,
                                 genres: {},
                               );
+                              _displayedCount = _pageSize;
                             });
                           },
                           child: const Text(
@@ -459,6 +489,7 @@ class _MyShowsScreenState extends State<MyShowsScreen> {
                                   sortOption: ShowSortOption.recentlyActive,
                                   genres: {},
                                 );
+                                _displayedCount = _pageSize;
                               });
                             },
                             child: const Text('Filtreleri Temizle'),
@@ -481,7 +512,7 @@ class _MyShowsScreenState extends State<MyShowsScreen> {
                     ),
                     delegate: SliverChildBuilderDelegate(
                       (context, index) {
-                        final show = filteredShows[index];
+                        final show = paginatedShows[index];
                         return ShowGridCard(
                           show: show,
                           onTap: () {
@@ -493,7 +524,7 @@ class _MyShowsScreenState extends State<MyShowsScreen> {
                           },
                         );
                       },
-                      childCount: filteredShows.length,
+                      childCount: paginatedShows.length,
                     ),
                   ),
                 )
@@ -504,7 +535,7 @@ class _MyShowsScreenState extends State<MyShowsScreen> {
                   sliver: SliverList(
                     delegate: SliverChildBuilderDelegate(
                       (context, index) {
-                        final show = filteredShows[index];
+                        final show = paginatedShows[index];
                         return WatchlistItemTile(
                           show: show,
                           onTap: () {
@@ -516,7 +547,7 @@ class _MyShowsScreenState extends State<MyShowsScreen> {
                           },
                         );
                       },
-                      childCount: filteredShows.length,
+                      childCount: paginatedShows.length,
                     ),
                   ),
                 ),
@@ -535,7 +566,14 @@ class _MyShowsScreenState extends State<MyShowsScreen> {
   Widget _buildQuickStatusChip(String label) {
     final isSelected = _quickStatus == label;
     return GestureDetector(
-      onTap: () => setState(() => _quickStatus = label),
+      onTap: () {
+        if (_quickStatus != label) {
+          setState(() {
+            _quickStatus = label;
+            _displayedCount = _pageSize;
+          });
+        }
+      },
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 150),
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
