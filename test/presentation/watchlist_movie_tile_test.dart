@@ -121,4 +121,45 @@ void main() {
     expect(find.text('İzlenecek'), findsOneWidget);
     await tester.pump(const Duration(milliseconds: 200));
   });
+
+  testWidgets('WatchlistMovieTile syncs isWatched when movie id changes in didUpdateWidget', (tester) async {
+    const movieA = MovieModel(
+      id: 61,
+      title: 'Movie A',
+      isFollowed: true,
+      isWatched: true,
+    );
+    const movieB = MovieModel(
+      id: 62,
+      title: 'Movie B',
+      isFollowed: true,
+      isWatched: false,
+    );
+    await db.upsertMovie(movieA);
+    await db.upsertMovie(movieB);
+
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: WatchlistMovieTile(
+          movie: movieA,
+          onTap: () {},
+        ),
+      ),
+    ));
+    await tester.pumpAndSettle();
+    expect(find.text('İzlendi ✓'), findsOneWidget);
+
+    // Rebuild with movieB (different ID, isWatched: false)
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: WatchlistMovieTile(
+          movie: movieB,
+          onTap: () {},
+        ),
+      ),
+    ));
+    await tester.pumpAndSettle();
+    expect(find.text('İzlenecek'), findsOneWidget);
+    await tester.pump(const Duration(milliseconds: 200));
+  });
 }

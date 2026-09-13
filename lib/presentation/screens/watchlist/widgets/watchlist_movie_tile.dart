@@ -45,17 +45,27 @@ class _WatchlistMovieTileState extends State<WatchlistMovieTile> {
   @override
   void didUpdateWidget(covariant WatchlistMovieTile oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.movie.isWatched != widget.movie.isWatched) {
+    if (oldWidget.movie.id != widget.movie.id ||
+        oldWidget.movie.isWatched != widget.movie.isWatched) {
       _isWatched = widget.movie.isWatched;
     }
   }
 
   Future<void> _handleToggleWatched(bool watched) async {
+    final previousState = _isWatched;
     setState(() {
       _isWatched = watched;
     });
-    await _dbService.toggleMovieWatched(widget.movie.id, isWatched: watched);
-    widget.onToggleWatched?.call(watched);
+    try {
+      await _dbService.toggleMovieWatched(widget.movie.id, isWatched: watched);
+      widget.onToggleWatched?.call(watched);
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _isWatched = previousState;
+        });
+      }
+    }
   }
 
   String _buildSubtitle() {
