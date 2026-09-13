@@ -1946,6 +1946,36 @@ class DatabaseService {
   // --- Movies Operations ---
   List<MovieModel> getAllMovies() => _movies.values.toList();
 
+  MovieModel? getMovieById(int id) => _movies[id];
+
+  List<MovieModel> getFollowedOrWatchedMovies() {
+    return _movies.values.where((m) => m.isFollowed || m.isWatched).toList();
+  }
+
+  MovieModel? getSpotlightMovie() {
+    final candidates = getFollowedOrWatchedMovies();
+    if (candidates.isEmpty) return null;
+
+    // 1. Priority: followed and not watched (watchlist)
+    final unwatchedFollowed = candidates.where((m) => m.isFollowed && !m.isWatched).toList();
+    if (unwatchedFollowed.isNotEmpty) {
+      return unwatchedFollowed.last;
+    }
+
+    // 2. Fallback: most recently watched
+    final watched = candidates.where((m) => m.isWatched).toList();
+    if (watched.isNotEmpty) {
+      watched.sort((a, b) {
+        final dateA = a.watchedAt ?? DateTime.fromMillisecondsSinceEpoch(0);
+        final dateB = b.watchedAt ?? DateTime.fromMillisecondsSinceEpoch(0);
+        return dateB.compareTo(dateA);
+      });
+      return watched.first;
+    }
+
+    return candidates.first;
+  }
+
   Future<MovieModel> upsertMovie(MovieModel movie, {bool notify = true}) async {
     MovieModel? existing = _movies[movie.id];
     if (existing == null && movie.tmdbId != null && movie.tmdbId! > 0) {
