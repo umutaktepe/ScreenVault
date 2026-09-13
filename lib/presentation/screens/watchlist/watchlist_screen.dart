@@ -5,13 +5,15 @@ import '../../../core/theme/app_typography.dart';
 import '../../../data/database/database_service.dart';
 import '../../../data/services/pocketbase_auth_service.dart';
 import '../../../data/models/show_model.dart';
-import '../../../data/models/movie_model.dart';
 import '../episode_detail/episode_detail_screen.dart';
 import '../show_detail/show_detail_screen.dart';
 import '../my_shows/my_shows_screen.dart';
-import '../../common/custom_poster_image.dart';
+import '../movie_detail/movie_detail_screen.dart';
+import '../my_movies/my_movies_screen.dart';
 import 'widgets/up_next_card.dart';
 import 'widgets/watchlist_item_tile.dart';
+import 'widgets/movie_spotlight_card.dart';
+import 'widgets/watchlist_movie_tile.dart';
 
 /// Main Watchlist Screen matching Stitch TV Time Tracker UI specification
 class WatchlistScreen extends StatefulWidget {
@@ -29,6 +31,7 @@ class _WatchlistScreenState extends State<WatchlistScreen> {
   final Set<int> _enrichingShowIds = {};
   int _selectedSegment = 0; // 0: TV Shows, 1: Movies
   String _filterCategory = 'All'; // All, In Progress, Up to Date
+  String _movieFilterCategory = 'All'; // All, Watchlist, Watched
 
   @override
   void initState() {
@@ -318,36 +321,198 @@ class _WatchlistScreenState extends State<WatchlistScreen> {
               ),
             ] else ...[
               // Movies View
+              // Spotlight Card
+              SliverToBoxAdapter(
+                child: StreamBuilder<List<ShowModel>>(
+                  stream: _dbService.showsStream,
+                  builder: (context, snapshot) {
+                    final spotlight = _dbService.getSpotlightMovie();
+                    if (spotlight == null) {
+                      return const SizedBox.shrink();
+                    }
+
+                    return MovieSpotlightCard(
+                      movie: spotlight,
+                      onTap: () {
+                        Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (context) => MovieDetailScreen(
+                              movie: spotlight,
+                            ),
+                          ),
+                        );
+                      },
+                    );
+                  },
+                ),
+              ),
+
+              // Section Header: "Filmlerim" & "Tümünü Gör >"
+              SliverToBoxAdapter(
+                child: StreamBuilder<List<ShowModel>>(
+                  stream: _dbService.showsStream,
+                  builder: (context, snapshot) {
+                    final allMovies = _dbService.getFollowedOrWatchedMovies();
+                    if (allMovies.isEmpty) return const SizedBox.shrink();
+
+                    final totalCount = allMovies.length;
+                    final shownCount = totalCount > 10 ? 10 : totalCount;
+
+                    return Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          Row(
+                            children: [
+                              const Text(
+                                'Filmlerim',
+                                style: TextStyle(
+                                  color: AppColors.textPrimary,
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.w800,
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                                decoration: BoxDecoration(
+                                  color: AppColors.surfaceHighlight,
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(color: AppColors.borderStroke, width: 0.5),
+                                ),
+                                child: Text(
+                                  '$shownCount / $totalCount',
+                                  style: const TextStyle(
+                                    color: AppColors.primaryAccent,
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          GestureDetector(
+                            onTap: () {
+                              Navigator.of(context).push(
+                                MaterialPageRoute(
+                                  builder: (context) => const MyMoviesScreen(),
+                                ),
+                              );
+                            },
+                            child: const Padding(
+                              padding: EdgeInsets.symmetric(vertical: 4),
+                              child: Text(
+                                'Tümünü Gör >',
+                                style: TextStyle(
+                                  color: AppColors.primaryAccent,
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+              ),
+
+              // Filter Chips (All, Watchlist, Watched)
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  child: Row(
+                    children: [
+                      _buildMovieFilterChip('All'),
+                      const SizedBox(width: 8),
+                      _buildMovieFilterChip('Watchlist'),
+                      const SizedBox(width: 8),
+                      _buildMovieFilterChip('Watched'),
+                    ],
+                  ),
+                ),
+              ),
+
+              // Movies Vertical Stream (Top 10 movies)
               StreamBuilder<List<ShowModel>>(
                 stream: _dbService.showsStream,
                 builder: (context, snapshot) {
-                  final movies = _dbService.getAllMovies().where((m) => m.isFollowed || m.isWatched).toList();
-                  if (movies.isEmpty) {
-                    return const SliverPadding(
-                      padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                      sliver: SliverToBoxAdapter(
-                        child: Padding(
-                          padding: EdgeInsets.symmetric(vertical: 48),
-                          child: Center(
-                            child: Text(
-                              'Takip edilen veya izlenen film bulunmuyor.',
-                              style: TextStyle(color: AppColors.secondarySlate, fontSize: 14),
-                            ),
+                  var movies = _dbService.getFollowedOrWatchedMovies();
+                  if (_movieFilterCategory == 'Watchlist') {
+                    movies = movies.where((m) => m.isFollowed && !m.isWatched).toList();
+                  } else if (_movieFilterCategory == 'Watched') {
+                    movies = movies.where((m) => m.isWatched).toList();
+                  }
+
+                  // Sort by recently active: recently watched first, then latest added (id descending)
+                  movies.sort((a, b) {
+                    final dateA = a.watchedAt ?? DateTime.fromMillisecondsSinceEpoch(0);
+                    final dateB = b.watchedAt ?? DateTime.fromMillisecondsSinceEpoch(0);
+                    if (a.watchedAt != null && b.watchedAt != null) {
+                      return dateB.compareTo(dateA);
+                    }
+                    if (a.watchedAt != null) return -1;
+                    if (b.watchedAt != null) return 1;
+                    return b.id.compareTo(a.id);
+                  });
+
+                  final totalMoviesCount = movies.length;
+                  final hasMore = totalMoviesCount > 10;
+                  final displayedMovies = movies.take(10).toList();
+
+                  if (displayedMovies.isEmpty) {
+                    return const SliverToBoxAdapter(
+                      child: Padding(
+                        padding: EdgeInsets.symmetric(vertical: 36),
+                        child: Center(
+                          child: Text(
+                            'Takip edilen veya izlenen film bulunmuyor.',
+                            style: TextStyle(color: AppColors.secondarySlate, fontSize: 14),
                           ),
                         ),
                       ),
                     );
                   }
-                  return SliverPadding(
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                    sliver: SliverList(
-                      delegate: SliverChildBuilderDelegate(
-                        (context, index) {
-                          final movie = movies[index];
-                          return _buildMovieTile(movie);
-                        },
-                        childCount: movies.length,
-                      ),
+
+                  return SliverList(
+                    delegate: SliverChildBuilderDelegate(
+                      (context, index) {
+                        // Trailing "Show More" Button Card
+                        if (index == displayedMovies.length) {
+                          return _buildMovieShowMoreButton(
+                            context,
+                            totalMoviesCount,
+                            totalMoviesCount - 10,
+                          );
+                        }
+
+                        final movie = displayedMovies[index];
+                        if ((movie.posterPath == null || movie.posterPath!.isEmpty) && !_enrichingMovieIds.contains(movie.id)) {
+                          _enrichingMovieIds.add(movie.id);
+                          WidgetsBinding.instance.addPostFrameCallback((_) {
+                            _dbService.enrichSingleMovie(movie).then((_) {
+                              if (mounted) setState(() {});
+                            });
+                          });
+                        }
+
+                        return WatchlistMovieTile(
+                          movie: movie,
+                          onTap: () {
+                            Navigator.of(context).push(
+                              MaterialPageRoute(
+                                builder: (context) => MovieDetailScreen(
+                                  movie: movie,
+                                ),
+                              ),
+                            );
+                          },
+                        );
+                      },
+                      childCount: displayedMovies.length + (hasMore ? 1 : 0),
                     ),
                   );
                 },
@@ -475,99 +640,87 @@ class _WatchlistScreenState extends State<WatchlistScreen> {
     );
   }
 
-  Widget _buildMovieTile(MovieModel movie) {
-    if ((movie.posterPath == null || movie.posterPath!.isEmpty) && !_enrichingMovieIds.contains(movie.id)) {
-      _enrichingMovieIds.add(movie.id);
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _dbService.enrichSingleMovie(movie).then((_) {
-          if (mounted) setState(() {});
-        });
-      });
-    }
-
-    return Container(
-      margin: const EdgeInsets.symmetric(vertical: 6),
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: AppColors.cardSurface,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: AppColors.borderStroke, width: 1),
-      ),
-      child: Row(
-        children: [
-          SizedBox(
-            width: 60,
-            height: 90,
-            child: movie.posterPath != null && movie.posterPath!.isNotEmpty
-                ? CustomPosterImage(
-                    path: movie.posterPath,
-                    borderRadius: 10,
-                  )
-                : Container(
-                    decoration: BoxDecoration(
-                      color: AppColors.surfaceHighlight,
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: const Center(
-                      child: Icon(Icons.movie_rounded, color: AppColors.secondarySlate, size: 28),
-                    ),
-                  ),
+  Widget _buildMovieFilterChip(String label) {
+    final isSelected = _movieFilterCategory == label;
+    return GestureDetector(
+      onTap: () => setState(() => _movieFilterCategory = label),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+        decoration: BoxDecoration(
+          color: isSelected ? AppColors.surfaceHighlight : AppColors.cardSurface,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: isSelected ? AppColors.primaryAccent : AppColors.borderStroke,
+            width: 1,
           ),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+        ),
+        child: Text(
+          label,
+          style: AppTypography.bodySmall.copyWith(
+            fontWeight: isSelected ? FontWeight.w700 : FontWeight.w500,
+            color: isSelected ? AppColors.primaryAccent : AppColors.secondarySlate,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMovieShowMoreButton(BuildContext context, int totalCount, int remainingCount) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: () => Navigator.of(context).push(
+            MaterialPageRoute(builder: (context) => const MyMoviesScreen()),
+          ),
+          borderRadius: BorderRadius.circular(16),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+            decoration: BoxDecoration(
+              color: AppColors.cardSurface,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: AppColors.borderStroke),
+            ),
+            child: Row(
               children: [
-                Text(
-                  movie.title,
-                  style: AppTypography.headline3,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: AppColors.primaryAccent.withValues(alpha: 0.15),
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(Icons.movie_filter_rounded, color: AppColors.primaryAccent, size: 20),
                 ),
-                const SizedBox(height: 6),
-                Text(
-                  '${movie.runtimeMinutes} dk • ${movie.genres.join(', ')}',
-                  style: AppTypography.bodySmall,
-                ),
-                const SizedBox(height: 8),
-                Row(
-                  children: [
-                    if (movie.isWatched)
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: AppColors.functionalSuccess.withValues(alpha: 0.15),
-                          borderRadius: BorderRadius.circular(6),
-                        ),
-                        child: Text(
-                          'İzlendi ✓',
-                          style: AppTypography.bodySmall.copyWith(
-                            color: AppColors.functionalSuccess,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                      )
-                    else if (movie.isFollowed)
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: AppColors.primaryAccent.withValues(alpha: 0.15),
-                          borderRadius: BorderRadius.circular(6),
-                        ),
-                        child: Text(
-                          'İzlenecek',
-                          style: AppTypography.bodySmall.copyWith(
-                            color: AppColors.primaryAccent,
-                            fontWeight: FontWeight.w700,
-                          ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Tüm Filmlerimi Gör',
+                        style: TextStyle(
+                          color: AppColors.textPrimary,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w700,
                         ),
                       ),
-                  ],
+                      const SizedBox(height: 2),
+                      Text(
+                        '+$remainingCount film daha kütüphanenizde',
+                        style: const TextStyle(
+                          color: AppColors.secondarySlate,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
+                const Icon(Icons.arrow_forward_ios_rounded, color: AppColors.secondarySlate, size: 16),
               ],
             ),
           ),
-        ],
+        ),
       ),
     );
   }
