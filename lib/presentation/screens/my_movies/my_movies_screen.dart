@@ -200,6 +200,8 @@ class _MyMoviesScreenState extends State<MyMoviesScreen> {
       ),
     );
 
+    if (!mounted) return;
+
     if (result != null) {
       setState(() {
         _filterResult = result;
@@ -210,23 +212,27 @@ class _MyMoviesScreenState extends State<MyMoviesScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: AppColors.canvasBase,
-      appBar: AppBar(
-        backgroundColor: AppColors.canvasBase,
-        surfaceTintColor: Colors.transparent,
-        elevation: 0,
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back_ios_new_rounded, color: AppColors.textPrimary, size: 20),
-          onPressed: () => Navigator.of(context).pop(),
-        ),
-        title: StreamBuilder<List<ShowModel>>(
-          stream: _dbService.showsStream,
-          builder: (context, snapshot) {
-            final followedCount = _dbService.getFollowedOrWatchedMovies().length;
-            final totalCount = _lastFilteredCount > 0 ? _lastFilteredCount : followedCount;
-            final countLabel = '$totalCount Film';
-            return Row(
+    return StreamBuilder<List<ShowModel>>(
+      stream: _dbService.showsStream,
+      builder: (context, snapshot) {
+        final allMovies = _dbService.getFollowedOrWatchedMovies();
+        final filteredMovies = _filterAndSortMovies(allMovies);
+        _lastFilteredCount = filteredMovies.length;
+        final paginatedMovies = filteredMovies.take(_displayedCount).toList();
+        final isCustomized = _filterResult.isCustomized;
+        final countLabel = '${filteredMovies.length} Film';
+
+        return Scaffold(
+          backgroundColor: AppColors.canvasBase,
+          appBar: AppBar(
+            backgroundColor: AppColors.canvasBase,
+            surfaceTintColor: Colors.transparent,
+            elevation: 0,
+            leading: IconButton(
+              icon: const Icon(Icons.arrow_back_ios_new_rounded, color: AppColors.textPrimary, size: 20),
+              onPressed: () => Navigator.of(context).pop(),
+            ),
+            title: Row(
               children: [
                 const Text(
                   'Tüm Filmlerim',
@@ -254,28 +260,20 @@ class _MyMoviesScreenState extends State<MyMoviesScreen> {
                   ),
                 ),
               ],
-            );
-          },
-        ),
-        actions: [
-          // View Mode Toggle (Icons.view_agenda_rounded for list mode, Icons.grid_view_rounded for grid mode)
-          IconButton(
-            tooltip: _isGridView ? 'Liste Görünümü' : 'Izgara Görünümü',
-            icon: Icon(
-              _isGridView ? Icons.view_agenda_rounded : Icons.grid_view_rounded,
-              color: AppColors.textPrimary,
-              size: 22,
             ),
-            onPressed: () => setState(() => _isGridView = !_isGridView),
-          ),
-          // Filter & Sort Button with Active Badge
-          StreamBuilder<List<ShowModel>>(
-            stream: _dbService.showsStream,
-            builder: (context, snapshot) {
-              final allMovies = _dbService.getFollowedOrWatchedMovies();
-              final isCustomized = _filterResult.isCustomized;
-
-              return Stack(
+            actions: [
+              // View Mode Toggle (Icons.view_agenda_rounded for list mode, Icons.grid_view_rounded for grid mode)
+              IconButton(
+                tooltip: _isGridView ? 'Liste Görünümü' : 'Izgara Görünümü',
+                icon: Icon(
+                  _isGridView ? Icons.view_agenda_rounded : Icons.grid_view_rounded,
+                  color: AppColors.textPrimary,
+                  size: 22,
+                ),
+                onPressed: () => setState(() => _isGridView = !_isGridView),
+              ),
+              // Filter & Sort Button with Active Badge
+              Stack(
                 alignment: Alignment.center,
                 children: [
                   IconButton(
@@ -301,21 +299,11 @@ class _MyMoviesScreenState extends State<MyMoviesScreen> {
                       ),
                     ),
                 ],
-              );
-            },
+              ),
+              const SizedBox(width: 6),
+            ],
           ),
-          const SizedBox(width: 6),
-        ],
-      ),
-      body: StreamBuilder<List<ShowModel>>(
-        stream: _dbService.showsStream,
-        builder: (context, snapshot) {
-          final allMovies = _dbService.getFollowedOrWatchedMovies();
-          final filteredMovies = _filterAndSortMovies(allMovies);
-          _lastFilteredCount = filteredMovies.length;
-          final paginatedMovies = filteredMovies.take(_displayedCount).toList();
-
-          return CustomScrollView(
+          body: CustomScrollView(
             controller: _scrollController,
             physics: const AlwaysScrollableScrollPhysics(parent: ClampingScrollPhysics()),
             slivers: [
@@ -573,9 +561,9 @@ class _MyMoviesScreenState extends State<MyMoviesScreen> {
                 child: SizedBox(height: 48),
               ),
             ],
-          );
-        },
-      ),
+          ),
+        );
+      },
     );
   }
 

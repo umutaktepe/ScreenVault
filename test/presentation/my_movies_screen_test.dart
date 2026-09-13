@@ -48,10 +48,18 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.widgetWithText(MovieGridCard, 'Movie 12'), findsOneWidget);
     expect(find.text('Movie 13'), findsNothing);
+    expect(find.text('1 Film'), findsOneWidget);
+
+    // Search with 0 matches displays '0 Film' in AppBar badge
+    await tester.enterText(find.byType(TextField), 'NonExistentMovie');
+    await tester.pumpAndSettle();
+    expect(find.text('0 Film'), findsOneWidget);
+    expect(find.text('25 Film'), findsNothing);
 
     // Clear search
     await tester.enterText(find.byType(TextField), '');
     await tester.pumpAndSettle();
+    expect(find.text('25 Film'), findsOneWidget);
 
     // Toggle between Grid and List view
     final listToggleIcon = find.byIcon(Icons.view_agenda_rounded);
