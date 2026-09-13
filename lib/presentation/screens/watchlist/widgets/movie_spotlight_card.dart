@@ -71,9 +71,93 @@ class _MovieSpotlightCardState extends State<MovieSpotlightCard> {
     }
   }
 
+  List<Widget> _buildMetadataWidgets(MovieModel movie) {
+    final items = <Widget>[];
+
+    if (movie.voteAverage > 0) {
+      items.add(
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(
+              Icons.star_rounded,
+              size: 16,
+              color: AppColors.primaryAccent,
+            ),
+            const SizedBox(width: 4),
+            Text(
+              movie.voteAverage.toStringAsFixed(1),
+              style: AppTypography.bodySmall.copyWith(
+                color: AppColors.primaryAccent,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    if (movie.runtimeMinutes > 0) {
+      items.add(
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(
+              Icons.schedule_rounded,
+              size: 13,
+              color: AppColors.secondarySlate,
+            ),
+            const SizedBox(width: 4),
+            Text(
+              '${movie.runtimeMinutes} dk',
+              style: AppTypography.bodySmall.copyWith(
+                color: AppColors.secondarySlate,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    if (movie.releaseDate != null) {
+      items.add(
+        Text(
+          '${movie.releaseDate!.year}',
+          style: AppTypography.bodySmall.copyWith(
+            color: AppColors.secondarySlate,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+      );
+    }
+
+    if (items.isEmpty) return const [];
+
+    final children = <Widget>[];
+    for (int i = 0; i < items.length; i++) {
+      if (i > 0) {
+        children.add(
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            child: Text(
+              '•',
+              style: TextStyle(
+                color: AppColors.secondarySlate.withValues(alpha: 0.5),
+              ),
+            ),
+          ),
+        );
+      }
+      children.add(items[i]);
+    }
+    return children;
+  }
+
   @override
   Widget build(BuildContext context) {
     final movie = widget.movie;
+    final metadataWidgets = _buildMetadataWidgets(movie);
 
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -221,69 +305,13 @@ class _MovieSpotlightCardState extends State<MovieSpotlightCard> {
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                       ),
-                      const SizedBox(height: 6),
-                      // Metadata row: Star rating, Runtime, Release year
-                      Row(
-                        children: [
-                          if (movie.voteAverage > 0) ...[
-                            const Icon(
-                              Icons.star_rounded,
-                              size: 16,
-                              color: AppColors.primaryAccent,
-                            ),
-                            const SizedBox(width: 4),
-                            Text(
-                              movie.voteAverage.toStringAsFixed(1),
-                              style: AppTypography.bodySmall.copyWith(
-                                color: AppColors.primaryAccent,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            Text(
-                              '•',
-                              style: TextStyle(
-                                color: AppColors.secondarySlate.withValues(alpha: 0.5),
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                          ],
-                          if (movie.runtimeMinutes > 0) ...[
-                            const Icon(
-                              Icons.schedule_rounded,
-                              size: 13,
-                              color: AppColors.secondarySlate,
-                            ),
-                            const SizedBox(width: 4),
-                            Text(
-                              '${movie.runtimeMinutes} dk',
-                              style: AppTypography.bodySmall.copyWith(
-                                color: AppColors.secondarySlate,
-                                fontWeight: FontWeight.w500,
-                              ),
-                            ),
-                            if (movie.releaseDate != null) ...[
-                              const SizedBox(width: 8),
-                              Text(
-                                '•',
-                                style: TextStyle(
-                                  color: AppColors.secondarySlate.withValues(alpha: 0.5),
-                                ),
-                              ),
-                              const SizedBox(width: 8),
-                            ],
-                          ],
-                          if (movie.releaseDate != null) ...[
-                            Text(
-                              '${movie.releaseDate!.year}',
-                              style: AppTypography.bodySmall.copyWith(
-                                color: AppColors.secondarySlate,
-                                fontWeight: FontWeight.w500,
-                              ),
-                            ),
-                          ],
-                        ],
-                      ),
+                      if (metadataWidgets.isNotEmpty) ...[
+                        const SizedBox(height: 6),
+                        // Metadata row: Star rating, Runtime, Release year
+                        Row(
+                          children: metadataWidgets,
+                        ),
+                      ],
                       // Genres pills
                       if (movie.genres.isNotEmpty) ...[
                         const SizedBox(height: 10),

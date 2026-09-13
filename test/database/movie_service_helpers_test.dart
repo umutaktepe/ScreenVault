@@ -38,7 +38,13 @@ void main() {
     expect(ids, isNot(contains(3)));
   });
 
+  test('getSpotlightMovie returns null when candidate pool is empty', () {
+    expect(db.getSpotlightMovie(), isNull);
+  });
+
   test('getSpotlightMovie prioritizes unwatched followed movie, falls back to latest watched', () async {
+    expect(db.getSpotlightMovie(), isNull, reason: 'Empty candidate pool must return null');
+
     final watchedMovie = MovieModel(
       id: 10,
       title: 'Past Watched',
@@ -58,5 +64,34 @@ void main() {
 
     await db.upsertMovie(watchlistMovie);
     expect(db.getSpotlightMovie()?.id, 20, reason: 'Watchlist movie should take priority over watched movie');
+  });
+
+  test('getSpotlightMovie returns most recently watched movie when falling back to watched movies', () async {
+    final now = DateTime.now();
+    final movieA = MovieModel(
+      id: 30,
+      title: 'Watched 2 Days Ago',
+      isFollowed: false,
+      isWatched: true,
+      watchedAt: now.subtract(const Duration(days: 2)),
+    );
+    final movieB = MovieModel(
+      id: 40,
+      title: 'Watched Yesterday',
+      isFollowed: false,
+      isWatched: true,
+      watchedAt: now.subtract(const Duration(days: 1)),
+    );
+
+    await db.upsertMovie(movieA);
+    await db.upsertMovie(movieB);
+
+    final spotlight = db.getSpotlightMovie();
+    expect(spotlight, isNotNull);
+    expect(
+      spotlight!.id,
+      40,
+      reason: 'Should return movie B which was watched more recently than movie A',
+    );
   });
 }
