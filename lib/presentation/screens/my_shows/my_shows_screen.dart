@@ -236,9 +236,7 @@ class _MyShowsScreenState extends State<MyShowsScreen> {
           builder: (context, snapshot) {
             final followedCount = _dbService.getFollowedShows().length;
             final totalCount = _lastFilteredCount > 0 ? _lastFilteredCount : followedCount;
-            final countLabel = totalCount <= _pageSize
-                ? '$totalCount'
-                : '${_displayedCount.clamp(0, totalCount)} / $totalCount';
+            final countLabel = '$totalCount';
             return Row(
               children: [
                 const Text(

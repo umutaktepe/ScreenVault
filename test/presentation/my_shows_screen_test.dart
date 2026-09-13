@@ -199,7 +199,7 @@ void main() {
     expect(find.textContaining('dizi listelendi'), findsNothing);
   });
 
-  testWidgets('MyShowsScreen displays dynamic count badge in AppBar (20 / 35 then 35)', (tester) async {
+  testWidgets('MyShowsScreen displays total count badge in AppBar (35)', (tester) async {
     tester.view.physicalSize = const Size(800, 3000);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.resetPhysicalSize);
@@ -218,14 +218,7 @@ void main() {
     await tester.pumpWidget(const MaterialApp(home: MyShowsScreen()));
     await tester.pumpAndSettle();
 
-    // Initially shows 20 / 35
-    expect(find.text('20 / 35'), findsOneWidget);
-
-    // Scroll to load remaining
-    await tester.drag(find.byType(CustomScrollView), const Offset(0, -1200));
-    await tester.pumpAndSettle();
-
-    // Now all 35 loaded
-    expect(find.text('35 / 35'), findsOneWidget);
+    // Displays total count 35
+    expect(find.text('35'), findsOneWidget);
   });
 }
