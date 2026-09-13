@@ -143,11 +143,10 @@ void main() {
     await tester.pump(const Duration(seconds: 1));
 
     final interstellar = find.text('Interstellar');
-    if (interstellar.evaluate().isNotEmpty) {
-      await tester.tap(interstellar.first);
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 500));
-      expect(find.byType(MovieDetailScreen), findsOneWidget);
-    }
+    expect(interstellar, findsOneWidget);
+    await tester.tap(interstellar);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(find.byType(MovieDetailScreen), findsOneWidget);
   });
 }

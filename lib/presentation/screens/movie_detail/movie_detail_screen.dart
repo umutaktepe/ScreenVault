@@ -26,7 +26,6 @@ class MovieDetailScreen extends StatefulWidget {
 class _MovieDetailScreenState extends State<MovieDetailScreen> {
   final DatabaseService _dbService = DatabaseService();
   late MovieModel _currentMovie;
-  StreamSubscription? _dbSub;
 
   @override
   void initState() {
@@ -43,23 +42,6 @@ class _MovieDetailScreenState extends State<MovieDetailScreen> {
         }
       }));
     }
-
-    _dbSub = _dbService.showsStream.listen((_) {
-      if (mounted) {
-        final up = _dbService.getMovieById(_currentMovie.id);
-        if (up != null) {
-          setState(() {
-            _currentMovie = up;
-          });
-        }
-      }
-    });
-  }
-
-  @override
-  void dispose() {
-    _dbSub?.cancel();
-    super.dispose();
   }
 
   Future<void> _toggleWatchlist() async {
@@ -327,14 +309,18 @@ class _MovieDetailScreenState extends State<MovieDetailScreen> {
                                       size: 18,
                                     ),
                                     const SizedBox(width: 8),
-                                    Text(
-                                      movie.isFollowed ? 'Listemde' : 'İzleme Listesine Ekle',
-                                      style: TextStyle(
-                                        color: movie.isFollowed
-                                            ? AppColors.textOnAccent
-                                            : Colors.white,
-                                        fontSize: 13,
-                                        fontWeight: FontWeight.w700,
+                                    Flexible(
+                                      child: Text(
+                                        movie.isFollowed ? 'Listemde' : 'İzleme Listesine Ekle',
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          color: movie.isFollowed
+                                              ? AppColors.textOnAccent
+                                              : Colors.white,
+                                          fontSize: 13,
+                                          fontWeight: FontWeight.w700,
+                                        ),
                                       ),
                                     ),
                                   ],
@@ -373,12 +359,16 @@ class _MovieDetailScreenState extends State<MovieDetailScreen> {
                                       size: 18,
                                     ),
                                     const SizedBox(width: 8),
-                                    Text(
-                                      movie.isWatched ? 'İzlendi ✓' : 'İzlendi Olarak İşaretle',
-                                      style: const TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 13,
-                                        fontWeight: FontWeight.w700,
+                                    Flexible(
+                                      child: Text(
+                                        movie.isWatched ? 'İzlendi ✓' : 'İzlendi Olarak İşaretle',
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: const TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 13,
+                                          fontWeight: FontWeight.w700,
+                                        ),
                                       ),
                                     ),
                                   ],
