@@ -58,8 +58,8 @@ void main() {
     expect(find.byIcon(Icons.grid_view_rounded), findsOneWidget);
   });
 
-  testWidgets('MyShowsScreen paginates 20 items and loads more on scroll', (tester) async {
-    tester.view.physicalSize = const Size(800, 3000);
+  testWidgets('MyShowsScreen paginates 18 items and loads more on scroll', (tester) async {
+    tester.view.physicalSize = const Size(800, 2600);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.resetPhysicalSize);
 
@@ -78,7 +78,8 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Dizi 1'), findsOneWidget);
-    expect(find.text('Dizi 20'), findsOneWidget);
+    expect(find.text('Dizi 18'), findsOneWidget);
+    expect(find.text('Dizi 19'), findsNothing);
     expect(find.text('Dizi 25'), findsNothing);
     expect(find.text('Dizi 35'), findsNothing);
 
@@ -94,8 +95,8 @@ void main() {
     expect(find.text('Dizi 35'), findsOneWidget);
   });
 
-  testWidgets('MyShowsScreen resets pagination to 20 when search query changes', (tester) async {
-    tester.view.physicalSize = const Size(800, 3000);
+  testWidgets('MyShowsScreen resets pagination to 18 when search query changes', (tester) async {
+    tester.view.physicalSize = const Size(800, 2600);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.resetPhysicalSize);
 
@@ -129,7 +130,8 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Dizi 1'), findsOneWidget);
-    expect(find.text('Dizi 20'), findsOneWidget);
+    expect(find.text('Dizi 18'), findsOneWidget);
+    expect(find.text('Dizi 19'), findsNothing);
     expect(find.text('Dizi 25'), findsNothing);
   });
 
@@ -157,7 +159,7 @@ void main() {
   });
 
   testWidgets('MyShowsScreen shows end-of-list indicator only after scrolling to bottom with multiple pages', (tester) async {
-    tester.view.physicalSize = const Size(800, 3000);
+    tester.view.physicalSize = const Size(800, 2600);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.resetPhysicalSize);
 
@@ -175,7 +177,7 @@ void main() {
     await tester.pumpWidget(const MaterialApp(home: MyShowsScreen()));
     await tester.pumpAndSettle();
 
-    // With 35 items and 20 per page, initially indicator should not be shown
+    // With 35 items and 18 per page, initially indicator should not be shown
     expect(find.textContaining('Tüm 35 dizi listelendi'), findsNothing);
     expect(find.byIcon(Icons.movie_filter_outlined), findsNothing);
 

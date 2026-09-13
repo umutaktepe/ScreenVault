@@ -20,7 +20,7 @@ class MyShowsScreen extends StatefulWidget {
 }
 
 class _MyShowsScreenState extends State<MyShowsScreen> {
-  static const int _pageSize = 20;
+  static const int _pageSize = 18;
 
   final DatabaseService _dbService = DatabaseService();
   final TextEditingController _searchController = TextEditingController();
@@ -80,7 +80,7 @@ class _MyShowsScreenState extends State<MyShowsScreen> {
     });
 
     // Provide a brief tactile loading delay (300ms) to prevent cascading momentum flings
-    // and give visual feedback to the user that a new batch of 20 is being fetched
+    // and give visual feedback to the user that a new batch of 18 is being fetched
     await Future.delayed(const Duration(milliseconds: 300));
     if (!mounted) return;
 

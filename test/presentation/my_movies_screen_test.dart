@@ -223,8 +223,8 @@ void main() {
     expect(tapped, isTrue);
   });
 
-  testWidgets('MyMoviesScreen paginates 20 items and loads more on scroll', (tester) async {
-    tester.view.physicalSize = const Size(800, 3000);
+  testWidgets('MyMoviesScreen paginates 18 items and loads more on scroll', (tester) async {
+    tester.view.physicalSize = const Size(800, 2600);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.resetPhysicalSize);
 
@@ -240,9 +240,10 @@ void main() {
     await tester.pumpWidget(const MaterialApp(home: MyMoviesScreen()));
     await tester.pumpAndSettle();
 
-    // Initially 20 items loaded (Movie 35 down to Movie 16)
+    // Initially 18 items loaded (Movie 35 down to Movie 18)
     expect(find.text('Movie 35'), findsOneWidget);
-    expect(find.text('Movie 16'), findsOneWidget);
+    expect(find.text('Movie 18'), findsOneWidget);
+    expect(find.text('Movie 17'), findsNothing);
     expect(find.text('Movie 10'), findsNothing);
     expect(find.text('Movie 1'), findsNothing);
 

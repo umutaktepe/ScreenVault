@@ -13,7 +13,7 @@ import 'widgets/my_movies_filter_sheet.dart';
 /// - Live search filtering (by title and genres)
 /// - Quick status filter chips (Tümü, İzlenecekler, İzlenenler)
 /// - Advanced Filter & Sort bottom sheet (Genres, Years, Multi-criteria sorting)
-/// - Infinite scroll pagination (20 per page)
+/// - Infinite scroll pagination (18 per page - divisible by 3 for 3-column grid)
 class MyMoviesScreen extends StatefulWidget {
   const MyMoviesScreen({super.key});
 
@@ -22,7 +22,7 @@ class MyMoviesScreen extends StatefulWidget {
 }
 
 class _MyMoviesScreenState extends State<MyMoviesScreen> {
-  static const int _pageSize = 20;
+  static const int _pageSize = 18;
 
   final DatabaseService _dbService = DatabaseService();
   final TextEditingController _searchController = TextEditingController();
@@ -80,6 +80,8 @@ class _MyMoviesScreenState extends State<MyMoviesScreen> {
       _isLoadingMore = true;
     });
 
+    // Provide a brief tactile loading delay (300ms) to prevent cascading momentum flings
+    // and give visual feedback to the user that a new batch of 18 is being fetched
     await Future.delayed(const Duration(milliseconds: 300));
     if (!mounted) return;
 
