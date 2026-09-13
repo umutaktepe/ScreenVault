@@ -391,6 +391,18 @@ class DatabaseService {
         await (_db.delete(_db.seasonsTable)..where((t) => t.id.equals(emptyS.id))).go();
       }
     }
+
+    // Purge corrupted bogus records where seasonNumber == 0 AND episodeNumber == 0
+    final bogusRecords = await (_db.select(_db.episodeWatchHistoryTable)
+          ..where((t) => t.seasonNumber.equals(0) & t.episodeNumber.equals(0)))
+        .get();
+    if (bogusRecords.isNotEmpty) {
+      await (_db.delete(_db.episodeWatchHistoryTable)
+            ..where((t) => t.seasonNumber.equals(0) & t.episodeNumber.equals(0)))
+          .go();
+      _watchRecords.removeWhere((r) => r.seasonNumber == 0 && r.episodeNumber == 0);
+      debugPrint('[DatabaseService] Purged ${bogusRecords.length} bogus zero-season/episode records.');
+    }
   }
 
   Future<void> _deduplicateDatabaseTables() async {
@@ -562,6 +574,8 @@ class DatabaseService {
     final dbHistory = await _db.select(_db.episodeWatchHistoryTable).get();
     _watchRecords.clear();
     for (final h in dbHistory) {
+      if (h.seasonNumber == 0 && h.episodeNumber == 0) continue;
+      if (h.episodeNumber <= 0) continue;
       _watchRecords.add(WatchRecordModel(
         id: h.id,
         episodeId: h.episodeId,
@@ -2072,6 +2086,9 @@ class DatabaseService {
 
   // --- Watch Records & Stats ---
   void addWatchRecord(WatchRecordModel record) {
+    if (record.seasonNumber == 0 && record.episodeNumber == 0) return;
+    if (record.episodeNumber <= 0) return;
+
     _watchRecords.add(record);
     _recordLastWatched(record.showId, record.tvdbId ?? record.sId, record.watchedAt);
     _db.into(_db.episodeWatchHistoryTable).insert(
@@ -2092,15 +2109,19 @@ class DatabaseService {
   }
 
   Future<void> addWatchRecordsBatch(List<WatchRecordModel> records) async {
-    if (records.isEmpty) return;
-    _watchRecords.addAll(records);
-    for (final r in records) {
+    final validRecords = records
+        .where((r) => !(r.seasonNumber == 0 && r.episodeNumber == 0) && r.episodeNumber > 0)
+        .toList();
+    if (validRecords.isEmpty) return;
+
+    _watchRecords.addAll(validRecords);
+    for (final r in validRecords) {
       _recordLastWatched(r.showId, r.tvdbId ?? r.sId, r.watchedAt);
     }
     await _db.batch((batch) {
       batch.insertAll(
         _db.episodeWatchHistoryTable,
-        records.map((record) => EpisodeWatchHistoryTableCompanion.insert(
+        validRecords.map((record) => EpisodeWatchHistoryTableCompanion.insert(
               title: record.title,
               watchedAt: record.watchedAt,
               episodeId: Value(record.episodeId),
@@ -2334,6 +2355,9 @@ class DatabaseService {
   List<WatchRecordModel> getAllWatchRecords() => List.unmodifiable(_watchRecords);
 
   Future<void> insertWatchRecord(WatchRecordModel record) async {
+    if (record.seasonNumber == 0 && record.episodeNumber == 0) return;
+    if (record.episodeNumber <= 0) return;
+
     final show = findShow(showId: record.showId, tvdbId: record.tvdbId);
     final resolvedShowId = show?.id ?? record.showId;
     final resolvedTvdbId = show?.tvdbId ?? record.tvdbId;

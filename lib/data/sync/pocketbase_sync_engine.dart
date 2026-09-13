@@ -352,6 +352,11 @@ class PocketBaseSyncEngine {
       }
 
       final recordsToUpload = localHistory.where((local) {
+        // Skip invalid/bogus records (e.g. series follow rows imported with season 0 and episode 0)
+        if (local.seasonNumber == 0 && local.episodeNumber == 0) return false;
+        if (local.episodeNumber <= 0) return false;
+        if (local.seasonNumber < 0) return false;
+
         final show = _dbService.findShow(showId: local.showId, tvdbId: local.tvdbId);
         final canonicalId = show != null
             ? getCanonicalShowId(show)
@@ -363,12 +368,11 @@ class PocketBaseSyncEngine {
       for (int i = 0; i < recordsToUpload.length; i += batchSize) {
         final chunk = recordsToUpload.skip(i).take(batchSize);
         await Future.wait(chunk.map((local) async {
+          final show = _dbService.findShow(showId: local.showId, tvdbId: local.tvdbId);
+          final canonicalId = show != null
+              ? getCanonicalShowId(show)
+              : (local.tvdbId != null && local.tvdbId! > 0 ? local.tvdbId! : (local.showId ?? 0));
           try {
-            final show = _dbService.findShow(showId: local.showId, tvdbId: local.tvdbId);
-            final canonicalId = show != null
-                ? getCanonicalShowId(show)
-                : (local.tvdbId != null && local.tvdbId! > 0 ? local.tvdbId! : (local.showId ?? 0));
-
             _recordEcho('watch_${canonicalId}_${local.seasonNumber}_${local.episodeNumber}');
             await _pb.collection('watch_history').create(body: {
               'user': user.id,
@@ -385,7 +389,7 @@ class PocketBaseSyncEngine {
             });
             uploaded++;
           } catch (e) {
-            debugPrint('[SyncEngine] Error uploading watch record: $e');
+            debugPrint('[SyncEngine] Error uploading watch record (show: $canonicalId, S${local.seasonNumber}E${local.episodeNumber}): $e');
           }
         }));
       }
@@ -509,6 +513,9 @@ class PocketBaseSyncEngine {
   /// Pushes an episode watch toggle directly to PocketBase in the background.
   Future<void> pushWatchRecord(WatchRecordModel record, {bool isWatched = true}) async {
     if (!_client.isAuthenticated) return;
+    if (record.seasonNumber == 0 && record.episodeNumber == 0) return;
+    if (record.episodeNumber <= 0) return;
+    if (record.seasonNumber < 0) return;
 
     final user = _client.currentUser;
     if (user == null) return;

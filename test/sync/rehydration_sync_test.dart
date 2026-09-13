@@ -5,6 +5,7 @@ import 'package:screenvault/data/database/database_service.dart';
 import 'package:screenvault/data/models/show_model.dart';
 import 'package:screenvault/data/models/movie_model.dart';
 import 'package:screenvault/data/models/episode_model.dart';
+import 'package:drift/drift.dart' show Value;
 import 'package:screenvault/data/models/watch_record_model.dart';
 
 void main() {
@@ -243,6 +244,65 @@ void main() {
       expect(restartDbService.getAllWatchRecords().first.title, 'Episode 1');
       expect(restartDbService.getAllShows().length, 1);
       expect(restartDbService.getAllShows().first.name, 'Offline Series');
+    });
+
+    test('Rejects bogus zero-season and zero-episode watch records and purges existing corruptions on init', () async {
+      await dbService.init();
+
+      // 1. Trying to add a bogus record (season 0 & episode 0) should be blocked
+      final bogusRecord = WatchRecordModel(
+        id: 1001,
+        showId: 20,
+        seasonNumber: 0,
+        episodeNumber: 0,
+        title: 'Bogus Show Entry',
+        runtimeMinutes: 0,
+        watchedAt: DateTime.now(),
+      );
+      dbService.addWatchRecord(bogusRecord);
+      await dbService.insertWatchRecord(bogusRecord);
+      await dbService.addWatchRecordsBatch([bogusRecord]);
+
+      expect(dbService.getAllWatchRecords(), isEmpty,
+          reason: 'Bogus records with seasonNumber==0 and episodeNumber==0 must not be stored');
+
+      // 2. Valid special episode (season 0, episode 1) should be accepted
+      final specialRecord = WatchRecordModel(
+        id: 1002,
+        showId: 20,
+        seasonNumber: 0,
+        episodeNumber: 1,
+        title: 'Christmas Special',
+        runtimeMinutes: 60,
+        watchedAt: DateTime.now(),
+      );
+      await dbService.insertWatchRecord(specialRecord);
+      expect(dbService.getAllWatchRecords().length, 1);
+      expect(dbService.getAllWatchRecords().first.seasonNumber, 0);
+      expect(dbService.getAllWatchRecords().first.episodeNumber, 1);
+
+      // 3. Simulate legacy database containing bogus zero records directly in SQLite table
+      await db.into(db.episodeWatchHistoryTable).insert(
+            EpisodeWatchHistoryTableCompanion.insert(
+              id: const Value(9999),
+              title: 'Corrupted Row',
+              watchedAt: DateTime.now(),
+              seasonNumber: const Value(0),
+              episodeNumber: const Value(0),
+              runtimeMinutes: const Value(0),
+              rewatchCount: const Value(1),
+            ),
+          );
+
+      // Re-initialize DatabaseService to verify self-healing auto-purge
+      final freshDbService = DatabaseService(db: db);
+      await freshDbService.init();
+
+      // Bogus record must be purged from both memory and SQLite
+      final allRecords = freshDbService.getAllWatchRecords();
+      expect(allRecords.any((r) => r.seasonNumber == 0 && r.episodeNumber == 0), isFalse);
+      final rawHistory = await db.select(db.episodeWatchHistoryTable).get();
+      expect(rawHistory.any((h) => h.seasonNumber == 0 && h.episodeNumber == 0), isFalse);
     });
   });
 }

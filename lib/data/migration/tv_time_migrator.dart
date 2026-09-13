@@ -487,16 +487,23 @@ class TvTimeMigrator {
           if (line.isEmpty) continue;
           final cols = _parseCsvLine(line);
           if (cols.length >= 28) {
+            final key = cols.length > 9 ? cols[9] : '';
+            // Only process genuine episode watch and rewatch rows (exclude user-series, tracking-stats, etc.)
+            if (!key.startsWith('watch-episode') && !key.startsWith('rewatch-episode')) {
+              continue;
+            }
+
+            final epNo = int.tryParse(cols[1]) ?? (cols.length > 28 ? int.tryParse(cols[28]) : null) ?? 0;
+            if (epNo <= 0) continue;
+
             final runtimeSec = int.tryParse(cols[2]) ?? 0;
             final runtimeMin = DurationFormatter.secondsToMinutes(runtimeSec);
             totalWatchMinutes += runtimeMin;
 
             final sId = int.tryParse(cols[7]);
-            final epNo = int.tryParse(cols[1]) ?? (cols.length > 28 ? int.tryParse(cols[28]) : null) ?? 0;
             final sNo = int.tryParse(cols[8]) ?? int.tryParse(cols[27]) ?? 0;
             final title = cols.length > 26 && cols[26].isNotEmpty ? cols[26] : 'Show $sId';
             final watchedAt = DateTime.tryParse(cols[5]) ?? DateTime.now();
-            final key = cols.length > 9 ? cols[9] : '';
             final rewatchCol = cols.length > 23 ? (int.tryParse(cols[23]) ?? 0) : 0;
 
             final rawRow = _RawEpisodeRow(
