@@ -9,6 +9,7 @@ import '../../../data/models/movie_model.dart';
 import '../../../data/database/database_service.dart';
 import '../../common/custom_poster_image.dart';
 import '../show_detail/show_detail_screen.dart';
+import '../movie_detail/movie_detail_screen.dart';
 import 'widgets/trending_carousel.dart';
 import 'widgets/platform_filter_bar.dart';
 
@@ -145,13 +146,16 @@ class _DiscoverScreenState extends State<DiscoverScreen> with AutomaticKeepAlive
         ),
       );
     } else if (item is MovieModel) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          backgroundColor: AppColors.surfaceHighlight,
-          content: Text('${item.title} izleme listesine eklendi!'),
+      final resolvedMovie = _dbService.getMovieById(item.id) ??
+          (item.tmdbId != null ? _dbService.getMovieById(item.tmdbId!) : null) ??
+          item;
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (context) => MovieDetailScreen(
+            movie: resolvedMovie,
+          ),
         ),
       );
-      _dbService.upsertMovie(item.copyWith(isFollowed: true));
     }
   }
 
